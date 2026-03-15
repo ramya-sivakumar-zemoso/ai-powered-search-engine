@@ -40,15 +40,18 @@ A simple search engine using **Meilisearch** and **OpenAI embeddings** for hybri
    - `MEILI_URL` – (optional) Meilisearch URL, default `http://127.0.0.1:7700`
    - `MEILI_MASTER_KEY` – (optional) Meilisearch master key, default `aSampleMasterKey`
 
-4. With Meilisearch running, start the app:
-
-   ```bash
-   python main.py
-   ```
-
-   The first run can call `setup()` in `main.py` to create the index, load `movies.json`, and configure the OpenAI embedder. After that, comment out `setup()` and use `run_search("your query")` to search.
-
 ## Usage
 
-- **Setup (once):** Uncomment `setup()` in `main.py` to create the index, add documents, and create the embedder.
-- **Search:** Use `run_search("your query")` for hybrid search results.
+**First time only:** Run setup once to create the index, load documents (`movies.json`), and configure the OpenAI embedder:
+
+```bash
+python setup.py
+```
+
+**Every time you want to search:** Run the main app for search operations:
+
+```bash
+python main.py
+```
+
+You can edit the search query (or add more `run_search(...)` calls) in `main.py` to run different searches.

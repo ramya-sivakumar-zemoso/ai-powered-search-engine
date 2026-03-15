@@ -1,5 +1,7 @@
+"""Search: keyword, hybrid, semantic, and filtered search."""
 import requests
-from config.settings import MEILI_URL, SEARCH_HEADERS
+
+from config import MEILI_URL, MASTER_HEADERS
 
 
 def keyword_search(index_name: str, query: str, limit: int = 10):
@@ -9,8 +11,8 @@ def keyword_search(index_name: str, query: str, limit: int = 10):
     """
     response = requests.post(
         f"{MEILI_URL}/indexes/{index_name}/search",
-        headers=SEARCH_HEADERS,
-        json={"q": query, "limit": limit}
+        headers=MASTER_HEADERS,
+        json={"q": query, "limit": limit},
     )
     response.raise_for_status()
     return response.json()
@@ -21,7 +23,7 @@ def hybrid_search(
     query: str,
     embedder_name: str,
     semantic_ratio: float = 0.5,
-    limit: int = 10
+    limit: int = 10,
 ):
     """
     Hybrid search combining keyword + vector search.
@@ -30,15 +32,15 @@ def hybrid_search(
     """
     response = requests.post(
         f"{MEILI_URL}/indexes/{index_name}/search",
-        headers=SEARCH_HEADERS,
+        headers=MASTER_HEADERS,
         json={
-            "q":     query,
+            "q": query,
             "limit": limit,
             "hybrid": {
-                "embedder":      embedder_name,
-                "semanticRatio": semantic_ratio
-            }
-        }
+                "embedder": embedder_name,
+                "semanticRatio": semantic_ratio,
+            },
+        },
     )
     response.raise_for_status()
     return response.json()
@@ -48,7 +50,7 @@ def semantic_search(
     index_name: str,
     query: str,
     embedder_name: str,
-    limit: int = 10
+    limit: int = 10,
 ):
     """
     Pure vector/semantic search (no keyword matching).
@@ -56,7 +58,7 @@ def semantic_search(
     """
     return hybrid_search(
         index_name, query, embedder_name,
-        semantic_ratio=1.0, limit=limit
+        semantic_ratio=1.0, limit=limit,
     )
 
 
@@ -64,7 +66,7 @@ def filtered_search(
     index_name: str,
     query: str,
     filters: str,
-    limit: int = 10
+    limit: int = 10,
 ):
     """
     Keyword search with filters.
@@ -72,8 +74,8 @@ def filtered_search(
     """
     response = requests.post(
         f"{MEILI_URL}/indexes/{index_name}/search",
-        headers=SEARCH_HEADERS,
-        json={"q": query, "filter": filters, "limit": limit}
+        headers=MASTER_HEADERS,
+        json={"q": query, "filter": filters, "limit": limit},
     )
     response.raise_for_status()
     return response.json()
