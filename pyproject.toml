@@ -1,0 +1,62 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "novamart-search"
+version = "0.1.0"
+description = "AI-powered hybrid search engine for NovaMart"
+requires-python = ">=3.12"
+dependencies = [
+    # Core orchestration
+    "langgraph==0.2.55",
+    "langchain-core==0.3.25",
+    "langchain-openai==0.2.14",
+
+    # Search backend — Meilisearch REST (meilisearch_client, setup_index)
+    "requests==2.32.3",
+
+    # Embeddings + reranker
+    "sentence-transformers==3.3.1",
+    "torch==2.5.1",
+    "numpy==1.26.4",
+
+    # LLM Guard (prompt injection)
+    "llm-guard==0.3.14",
+
+    # Pydantic state schema
+    "pydantic==2.10.3",
+
+    # Async + HTTP
+    "httpx==0.27.2",
+    "aiohttp==3.11.10",
+
+    # Observability
+    "langsmith==0.2.3",
+
+    # Config
+    "python-dotenv==1.0.1",
+
+    # Data loading (Amazon dataset)
+    "datasets==3.2.0",
+    "pandas==2.2.3",
+    "tqdm==4.67.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==8.3.4",
+    "pytest-asyncio==0.24.0",
+    "pytest-mock==3.14.0",
+    "pytest-cov==6.0.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
