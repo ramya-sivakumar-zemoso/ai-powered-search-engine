@@ -62,3 +62,4 @@ logs/
 
 # Meilisearch data (if running locally in project)
 data.ms/
+meilisearch

@@ -1,213 +1,133 @@
-"""Pydantic models for LangGraph node contracts (SearchState and related types)."""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field, model_validator
-
+from pydantic import BaseModel, Field
 
 # ── Enums ─────────────────────────────────────────────────────────────────────
 
+class ErrorSeverity(str, Enum):
+    """How serious an error is. WARNING = degraded but usable. ERROR = node failed."""
+    WARNING = "WARNING"
+    ERROR = "ERROR"
+
 class IntentType(str, Enum):
+    """The type of user search intent (PRD Section 4.1 — query_understander output)."""
     NAVIGATIONAL = "NAVIGATIONAL"
     INFORMATIONAL = "INFORMATIONAL"
     TRANSACTIONAL = "TRANSACTIONAL"
 
-
 class RetrievalStrategy(str, Enum):
+    """Which search mode to use (PRD Section 4.2 — retrieval_strategy)."""
     KEYWORD = "KEYWORD"
     SEMANTIC = "SEMANTIC"
     HYBRID = "HYBRID"
 
-
 class ExplanationStatus(str, Enum):
-    VERIFIED = "VERIFIED"          # all cited fields confirmed in source_fields
-    UNVERIFIED = "UNVERIFIED"      # cited field absent or content mismatch
-    DEGRADED = "DEGRADED"          # confidence < 0.30, no explanation generated
-    ABSENT = "ABSENT"              # reranker failed for this result entirely
-    RERANK_DEGRADED = "RERANK_DEGRADED"  # entire LLM response rejected (confidence > 1.0)
+    """Status of a reranker explanation's citation audit (PRD Section 4.6)."""
+    VERIFIED = "VERIFIED"
+    UNVERIFIED = "UNVERIFIED"
+    DEGRADED = "DEGRADED"
+    ABSENT = "ABSENT"
 
-
-class ErrorSeverity(str, Enum):
-    WARNING = "WARNING"
-    ERROR = "ERROR"
-    CRITICAL = "CRITICAL"
-
-
-class EvaluatorDecision(str, Enum):
-    ACCEPT = "accept"
-    RETRY = "retry"
-    EXHAUSTED = "exhausted"
-
-
-class RetryReasonCode(str, Enum):
-    LOW_SEMANTIC = "LOW_SEMANTIC"
-    LOW_COVERAGE = "LOW_COVERAGE"
-    LOW_FRESHNESS = "LOW_FRESHNESS"
-    LOW_STABILITY = "LOW_STABILITY"
-
-
-# ── Sub-models ────────────────────────────────────────────────────────────────
-
-class IntentModel(BaseModel):
-    """Output of query_understander — parsed query intent."""
-    type: IntentType
-    entities: list[str] = Field(default_factory=list)
-    filters: dict[str, Any] = Field(default_factory=dict)
-    ambiguity_score: float = Field(ge=0.0, le=1.0)
-    language: str = "en"
-    sanitised_query: str = ""   # injection-stripped version used downstream
-
-
-class StrategyConfig(BaseModel):
-    """Output of retrieval_router — search strategy with weights."""
-    strategy: RetrievalStrategy
-    hybrid_weights: dict[str, float] = Field(default_factory=dict)
-    # e.g. {"semanticRatio": 0.55}
-    router_reasoning: str = ""
-
-
-class SearchResult(BaseModel):
-    """One result returned by Meilisearch searcher node."""
-    id: str
-    title: str
-    ranking_score: float = Field(alias="_rankingScore", default=0.0)
-    source_fields: dict[str, Any] = Field(default_factory=dict)
-    # source_fields populated ONLY from attributesToRetrieve in Meilisearch response
-    # Never from index schema — this is the citation audit ground truth
-    freshness_timestamp: datetime | None = None
-    filter_relaxation_applied: bool = False
-
-    model_config = {"populate_by_name": True}
-
-
-class RankedResult(BaseModel):
-    """One result after reranker — extends SearchResult with ranking metadata."""
-    id: str
-    title: str
-    original_rank: int
-    new_rank: int
-    relevance_score: float      # cross-encoder sigmoid score
-    confidence: float           # same value, surfaced separately for gates
-    explanation: str = ""
-    explanation_citation_ids: list[str] = Field(default_factory=list)
-    explanation_status: ExplanationStatus = ExplanationStatus.ABSENT
-    native_ranking_score: float = 0.0  # preserved _rankingScore for UNVERIFIED/DEGRADED
-
-
-class QualityScores(BaseModel):
-    """
-    Output of evaluator — 5-signal weighted quality score.
-    Weights must sum to 1.0 (asserted at node entry).
-    """
-    semantic_relevance: float = 0.0     # weight 0.30
-    coverage_score: float = 0.0         # weight 0.22
-    ranking_stability: float = 0.0      # weight 0.12
-    freshness_signal: float = 0.0       # weight 0.18
-    rerank_confidence: float = 0.0      # weight 0.18 — deferred, set after reranker
-    quality_score: float = 0.0          # final weighted sum
-
-
-class RetryPrescription(BaseModel):
-    """
-    Structured retry recommendation from evaluator → retrieval_router.
-    Router reads reason_code first — overrides rule table on retry attempts only.
-    """
-    recommended_strategy: RetrievalStrategy
-    weight_adjustments: dict[str, float] = Field(default_factory=dict)
-    reason_code: RetryReasonCode
-
-
-class FreshnessReport(BaseModel):
-    """Assembled by searcher (initial) and finalised by reporter."""
-    index_last_updated: datetime | None = None
-    staleness_flag: bool = False
-    stale_result_ids: list[str] = Field(default_factory=list)
-    max_staleness_seconds: float = 0.0
-    freshness_unknown: bool = False     # True when stats API was unavailable
-
-
+# ── Small models  ────────────────────────────────────────────
 class ExtractionError(BaseModel):
-    """Structured error written to state.errors by any node."""
+    """A structured error recorded by any node that encounters a problem."""
     node: str
     severity: ErrorSeverity
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
     message: str
     fallback_applied: bool = False
     fallback_description: str = ""
-
-
-class SearchAttempt(BaseModel):
-    """
-    One entry in search_history.
-    Used for near-duplicate detection — embedding stored for cosine comparison.
-    """
-    strategy: RetrievalStrategy
-    query_variant: str
-    query_embedding: list[float] = Field(default_factory=list)
-    quality_score: float = 0.0
-    freshness_reading: datetime | None = None
-
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 class TokenUsage(BaseModel):
-    """Tracks cumulative token spend across all LLM nodes."""
+    """Token usage from a single LLM call — stored per-node for cost tracking."""
+    node: str
     prompt_tokens: int = 0
     completion_tokens: int = 0
     cost_usd: float = 0.0
 
+class IntentModel(BaseModel):
+    """Parsed intent output from query_understander (PRD Section 4.2)."""
+    type: IntentType = IntentType.INFORMATIONAL
+    entities: list[str] = Field(default_factory=list)
+    filters: dict[str, Any] = Field(default_factory=dict)
+    ambiguity_score: float = 0.0
+    language: str = "en"
 
-# ── Top-level graph state ──────────────────────────────────────────────────────
+class SearchResult(BaseModel):
+    """A single search hit from Meilisearch (PRD Section 4.2)."""
+    id: str
+    title: str = ""
+    score: float = 0.0
+    source_fields: dict[str, Any] = Field(default_factory=dict)
+    freshness_timestamp: datetime | None = None
 
+class RankedResult(BaseModel):
+    """A re-ranked result with confidence and explanation (PRD Section 4.2)."""
+    id: str
+    original_rank: int = 0
+    new_rank: int = 0
+    relevance_score: float = 0.0
+    confidence: float = 0.0
+    explanation: str = ""
+    explanation_citation_ids: list[str] = Field(default_factory=list)
+    explanation_status: ExplanationStatus = ExplanationStatus.ABSENT
+
+class FreshnessReport(BaseModel):
+    """Index freshness metadata surfaced in every response (PRD Section 4.3)."""
+    index_last_updated: datetime | None = None
+    staleness_flag: bool = False
+    stale_result_ids: list[str] = Field(default_factory=list)
+    max_staleness_seconds: float = 0.0
+
+class RetryPrescription(BaseModel):
+    """Evaluator's recommendation for what to change on a retry attempt."""
+    reason_code: str = ""
+    suggested_strategy: RetrievalStrategy | None = None
+    suggested_query_variant: str = ""
+    explanation: str = ""
+
+class SearchAttempt(BaseModel):
+    """One entry in search_history — prevents near-duplicate searches (PRD 4.5)."""
+    strategy: RetrievalStrategy
+    query_variant: str
+    quality_score: float = 0.0
+    result_count: int = 0
+
+# ── Top-level graph state ─────────────────────────────────────────────────────
 class SearchState(BaseModel):
     """
-    Complete state passed between all LangGraph nodes.
-    Every field must be populated by its owning node before routing.
+    The master state object passed between all LangGraph nodes.
+    Every field here is readable/writable by any node in the pipeline.
     """
-
-    # ── Input ────────────────────────────────────────────────────────────────
-    query: str                              # raw, unmodified user query string
-    session_id: str = ""                    # for LangSmith traceability
-
-    # ── query_understander output ─────────────────────────────────────────────
-    parsed_intent: IntentModel | None = None
-    injection_detected: bool = False
-
-    # ── retrieval_router output ───────────────────────────────────────────────
-    retrieval_strategy: StrategyConfig | None = None
-
-    # ── searcher output ───────────────────────────────────────────────────────
+    # Original user query
+    query: str = ""
+    query_hash: str = ""
+    # query_understander output
+    parsed_intent: IntentModel = Field(default_factory=IntentModel)
+    # retrieval_router output
+    retrieval_strategy: RetrievalStrategy = RetrievalStrategy.HYBRID
+    hybrid_weights: dict[str, float] = Field(default_factory=lambda: {"semanticRatio": 0.50})
+    router_reasoning: str = ""
+    # searcher output
     search_results: list[SearchResult] = Field(default_factory=list)
-    partial_results: bool = False           # True when fallback triggered
-
-    # ── evaluator output ──────────────────────────────────────────────────────
-    quality_scores: QualityScores = Field(default_factory=QualityScores)
-    evaluator_decision: EvaluatorDecision | None = None
-    retry_prescription: RetryPrescription | None = None
-
-    # ── reranker output ───────────────────────────────────────────────────────
+    filter_relaxation_applied: bool = False
+    # reranker output
     reranked_results: list[RankedResult] = Field(default_factory=list)
-    reranker_gap_signal: str = ""           # set when mean confidence < 0.50
-
-    # ── Loop prevention ───────────────────────────────────────────────────────
+    # evaluator output
+    quality_scores: dict[str, float] = Field(default_factory=dict)
+    evaluator_decision: str = ""
+    retry_prescription: RetryPrescription | None = None
+    # Loop prevention (PRD Section 4.5)
     iteration_count: int = 0
     search_history: list[SearchAttempt] = Field(default_factory=list)
+    # Token budget tracking (PRD Section 4.5)
+    token_usage: list[TokenUsage] = Field(default_factory=list)
     cumulative_token_cost: float = 0.0
-    token_usage_per_node: dict[str, TokenUsage] = Field(default_factory=dict)
-
-    # ── Freshness ─────────────────────────────────────────────────────────────
+    # Freshness (PRD Section 4.3)
     freshness_metadata: FreshnessReport = Field(default_factory=FreshnessReport)
-
-    # ── Error audit ───────────────────────────────────────────────────────────
+    # Errors (PRD Section 4.2)
     errors: list[ExtractionError] = Field(default_factory=list)
-
-    # ── Reporter output (final) ───────────────────────────────────────────────
-    query_hash: str = ""
-    final_response: dict[str, Any] = Field(default_factory=dict)
-
-    @model_validator(mode="after")
-    def query_must_not_be_empty(self) -> "SearchState":
-        if not self.query.strip():
-            raise ValueError("query must not be empty")
-        return self
