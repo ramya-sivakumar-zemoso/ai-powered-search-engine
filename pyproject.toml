@@ -33,6 +33,7 @@ dependencies = [
 
     # Observability
     "langsmith==0.2.3",
+    "langwatch==0.13.0",
 
     # Config
     "python-dotenv==1.0.1",
