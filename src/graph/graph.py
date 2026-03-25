@@ -27,11 +27,12 @@ import hashlib
 import time
 
 import langwatch
-from langgraph.graph import StateGraph, END
+from langgraph.graph import StateGraph, START, END
 
 from src.models.state import SearchState
 from src.nodes.query_understander import query_understander_node
 from src.nodes.retrieval_router import retrieval_router_node
+from src.nodes.searcher import searcher_node
 from src.utils.langwatch_tracker import setup_langwatch, annotate_node_span
 from src.utils.logger import get_logger, log_node_exit
 from src.utils.config import get_settings
@@ -46,19 +47,7 @@ settings = get_settings()
 
 # query_understander_node — imported from src.nodes.query_understander
 # retrieval_router_node — imported from src.nodes.retrieval_router
-
-def searcher_node(state: dict) -> dict:
-    """Phase 3 will add: Meilisearch search + freshness metadata."""
-    start = time.perf_counter()
-
-    duration_ms = (time.perf_counter() - start) * 1000
-    log_node_exit(
-        logger, "searcher", state.get("query_hash", ""),
-        0, state.get("retrieval_strategy", "HYBRID"), duration_ms, 0.0,
-    )
-    annotate_node_span("searcher", 0, state.get("retrieval_strategy", "HYBRID"), duration_ms)
-
-    return state
+# searcher_node — imported from src.nodes.searcher
 
 
 def evaluator_node(state: dict) -> dict:
@@ -213,8 +202,8 @@ def build_graph() -> StateGraph:
     graph.add_node("reranker", reranker_node)
     graph.add_node("reporter", reporter_node)
 
-    # ── Set the entry point ──────────────────────────────────────────────────
-    graph.set_entry_point("query_understander")
+    # ── Set the entry point (langgraph 1.x uses START constant) ────────────
+    graph.add_edge(START, "query_understander")
 
     # ── Fixed edges (always go to the next node) ─────────────────────────────
     graph.add_edge("retrieval_router", "searcher")
