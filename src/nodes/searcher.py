@@ -1,7 +1,7 @@
 """
 Searcher node — calls Meilisearch and maps hits into SearchResult objects.
 
-What this node does (plain English):
+What this node does:
   1. Reads the retrieval strategy (KEYWORD / SEMANTIC / HYBRID) chosen by the router
   2. Builds a search query from parsed intent entities
   3. Builds Meilisearch filters from parsed intent filters (e.g. genre = "Action")
@@ -232,7 +232,7 @@ def searcher_node(state: dict) -> dict:
     start = time.perf_counter()
     query_hash = state.get("query_hash", "")
     strategy = state.get("retrieval_strategy", "HYBRID")
-    hybrid_weights = state.get("hybrid_weights", {"semanticRatio": 0.5})
+    hybrid_weights = state.get("hybrid_weights", {"semanticRatio": 0.6})
     filter_relaxation = False
 
     # ── Step 1: Build the search query ────────────────────────────────────────
