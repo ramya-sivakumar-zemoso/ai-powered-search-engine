@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import sys
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Any
 
 
@@ -13,7 +13,7 @@ class JsonFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:
         payload: dict[str, Any] = {
-            "asctime": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "asctime": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "name": record.name,
             "levelname": record.levelname,
             "message": record.getMessage(),

@@ -1,26 +1,33 @@
-langgraph==0.2.55
-langchain-core>=0.3.25
-langchain-openai==0.2.14
+# Core orchestration
+langgraph==1.0.9
+langchain-core>=1.0.2
+langchain-openai==1.0.3
+
+# Observability
 langwatch==0.13.0
 
-openai==1.57.2
-
+# Search backend (Meilisearch REST client)
 requests==2.32.3
 
+# Embeddings + reranker 
 sentence-transformers==3.3.1
-torch==2.5.1
+torch==2.3.1
 
+# State schema
 pydantic==2.10.3
 pydantic-settings==2.7.0
 
+# Config
 python-dotenv==1.0.1
 
+# Data loading
 pandas==2.2.3
 tqdm==4.67.1
 
-
+# Prompt injection detection 
 llm-guard==0.3.14
 
+# Testing
 pytest==8.3.4
 pytest-asyncio==0.24.0
 pytest-mock==3.14.0
