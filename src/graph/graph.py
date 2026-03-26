@@ -33,6 +33,7 @@ from src.models.state import SearchState
 from src.nodes.query_understander import query_understander_node
 from src.nodes.retrieval_router import retrieval_router_node
 from src.nodes.searcher import searcher_node
+from src.nodes.evaluator import evaluator_node
 from src.utils.langwatch_tracker import setup_langwatch, annotate_node_span
 from src.utils.logger import get_logger, log_node_exit
 from src.utils.config import get_settings
@@ -48,30 +49,7 @@ settings = get_settings()
 # query_understander_node — imported from src.nodes.query_understander
 # retrieval_router_node — imported from src.nodes.retrieval_router
 # searcher_node — imported from src.nodes.searcher
-
-
-def evaluator_node(state: dict) -> dict:
-    """Phase 4 will add: 5-signal quality scoring + retry decision."""
-    start = time.perf_counter()
-
-    # Stub always accepts — real evaluator will compute quality_score
-    state["evaluator_decision"] = "accept"
-    state["iteration_count"] = state.get("iteration_count", 0) + 1
-
-    duration_ms = (time.perf_counter() - start) * 1000
-    log_node_exit(
-        logger, "evaluator", state.get("query_hash", ""),
-        len(state.get("search_results", [])),
-        state.get("retrieval_strategy", "HYBRID"), duration_ms, 0.0,
-        extra={"decision": "accept", "iteration": state["iteration_count"]},
-    )
-    annotate_node_span(
-        "evaluator", len(state.get("search_results", [])),
-        state.get("retrieval_strategy", "HYBRID"), duration_ms,
-        extra={"decision": "accept"},
-    )
-
-    return state
+# evaluator_node — imported from src.nodes.evaluator
 
 
 def reranker_node(state: dict) -> dict:

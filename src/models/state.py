@@ -110,7 +110,7 @@ class SearchState(BaseModel):
     parsed_intent: IntentModel = Field(default_factory=IntentModel)
     # retrieval_router output
     retrieval_strategy: RetrievalStrategy = RetrievalStrategy.HYBRID
-    hybrid_weights: dict[str, float] = Field(default_factory=lambda: {"semanticRatio": 0.50})
+    hybrid_weights: dict[str, float] = Field(default_factory=lambda: {"semanticRatio": 0.60})
     router_reasoning: str = ""
     # searcher output
     search_results: list[SearchResult] = Field(default_factory=list)

@@ -184,7 +184,7 @@ def search(
     retrieve_fields: list[str] | None = None,
     index_name: str | None = None,
 ) -> dict[str, Any]:
-    alpha = (hybrid_weights or {}).get("semanticRatio", 0.5)
+    alpha = (hybrid_weights or {}).get("semanticRatio", 0.6)
     if strategy == "KEYWORD":
         return keyword_search(
             query, limit=limit, filters=filters,

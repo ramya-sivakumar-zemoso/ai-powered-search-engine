@@ -264,7 +264,7 @@ def retrieval_router_node(state: dict) -> dict:
         )
 
         strategy = parsed.get("strategy", "HYBRID")
-        semantic_ratio = float(parsed.get("semanticRatio", 0.50))
+        semantic_ratio = float(parsed.get("semanticRatio", 0.60))
         rule_applied = int(parsed.get("rule_applied", 0))
         reasoning = parsed.get("reasoning", "")
         used_llm = True
