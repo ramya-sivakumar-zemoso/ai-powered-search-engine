@@ -111,7 +111,7 @@ def _parse_intent_with_llm(query: str) -> tuple[dict, int, int]:
     """
     # Create the LLM client with settings from .env
     llm = ChatOpenAI(
-        model=settings.openai_model,       # "gpt-4o-mini-2024-07-18" from .env
+        model=settings.openai_model,       # "gpt-4o-mini" from .env
         temperature=0,                      # Deterministic output (PRD Section 5)
         api_key=settings.openai_api_key,   # From OPENAI_API_KEY in .env
     )

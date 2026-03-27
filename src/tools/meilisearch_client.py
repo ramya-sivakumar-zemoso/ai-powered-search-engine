@@ -120,7 +120,7 @@ def keyword_search(
 
 def hybrid_search(
     query: str,
-    semantic_ratio: float = 0.5,
+    semantic_ratio: float = 0.6,
     limit: int = 20,
     filters: str | None = None,
     retrieve_fields: list[str] | None = None,

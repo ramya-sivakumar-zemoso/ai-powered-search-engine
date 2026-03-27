@@ -58,7 +58,7 @@ def get_settings() -> Settings:
         meili_embedder_name=os.getenv("MEILI_EMBEDDER_NAME", "default"),
         # ── OpenAI ───────────────────────────────────────────
         openai_api_key=os.getenv("OPENAI_API_KEY", ""),
-        openai_model=os.getenv("OPENAI_MODEL", "gpt-4o-mini-2024-07-18"),
+        openai_model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
         # ── Embeddings ───────────────────────────────────────
         embedding_model=os.getenv("EMBEDDING_MODEL", "BAAI/bge-large-en"),
         embedding_dimensions=int(os.getenv("EMBEDDING_DIMENSIONS", "1024")),
