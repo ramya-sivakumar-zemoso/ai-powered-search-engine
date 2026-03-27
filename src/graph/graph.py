@@ -11,9 +11,8 @@ What this file does :
     5. reranker           — re-rank results using AI for better ordering
     6. reporter           — package final results and send to user
 
-  Right now all nodes are STUBS (placeholders). They log their name
-  and pass state through unchanged. We will replace each stub with
-  real logic in later phases.
+  Nodes 1-4 are fully implemented. Nodes 5-6 (reranker, reporter)
+  are stubs that will be replaced in later phases.
 
 requirements covered:
   - LangGraph StateGraph with all 6 nodes
@@ -23,35 +22,32 @@ requirements covered:
 
 from __future__ import annotations
 
-import hashlib
 import time
 from typing import Any
 
 import langwatch
 from langgraph.graph import StateGraph, START, END
 
-from src.models.state import SearchState
 from src.nodes.query_understander import query_understander_node
 from src.nodes.retrieval_router import retrieval_router_node
 from src.nodes.searcher import searcher_node
 from src.nodes.evaluator import evaluator_node
-from src.utils.langwatch_tracker import setup_langwatch, annotate_node_span
+from src.utils.langwatch_tracker import annotate_node_span
 from src.utils.logger import get_logger, log_node_exit
 from src.utils.config import get_settings
 from src.utils.state_display import state_delta
 
 logger = get_logger(__name__)
-settings = get_settings()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  NODE STUBS — each will be replaced with real logic in later phases
+#  NODES — implemented nodes are imported, stubs remain for reranker/reporter
 # ══════════════════════════════════════════════════════════════════════════════
 
 # query_understander_node — imported from src.nodes.query_understander
-# retrieval_router_node — imported from src.nodes.retrieval_router
-# searcher_node — imported from src.nodes.searcher
-# evaluator_node — imported from src.nodes.evaluator
+# retrieval_router_node   — imported from src.nodes.retrieval_router
+# searcher_node           — imported from src.nodes.searcher
+# evaluator_node          — imported from src.nodes.evaluator
 
 
 def reranker_node(state: dict) -> dict:
@@ -231,10 +227,18 @@ def compile_graph():
 @langwatch.trace()
 def run_search_with_trace(query: str) -> tuple[dict, list[dict]]:
     """
-    Run the full pipeline and capture each node's output for dashboards (e.g. Streamlit).
+    The main entry point for running a search query through the pipeline.
 
-    Uses LangGraph ``stream_mode="updates"`` so every step records the state dict
-    each node returns (this project mutates and returns full state from nodes).
+    What happens:
+      1. LangWatch starts a trace (the @langwatch.trace() decorator above)
+      2. We build the initial state with the user's query
+      3. The compiled graph runs the query through all 6 nodes
+      4. LangWatch records the full trace on the dashboard
+      5. The final state (with results) is returned
+
+    Args:
+        query: The raw search string from the user (e.g. "wireless earbuds under $50")
+
 
     Returns:
         ``(final_state, trace)`` where each trace item is
