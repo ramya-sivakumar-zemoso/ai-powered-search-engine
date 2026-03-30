@@ -276,12 +276,6 @@ def query_understander_node(state: dict) -> dict:
         )
         state["search_history"] = history
 
-    except ValueError:
-        # Budget exceeded — check_budget() raised ValueError
-        errors = state.get("errors", [])
-        errors.append(make_budget_exceeded_error("query_understander").model_dump())
-        state["errors"] = errors
-
     except json.JSONDecodeError as exc:
         # GPT returned invalid JSON — use safe defaults
         logger.warning(
@@ -304,6 +298,12 @@ def query_understander_node(state: dict) -> dict:
                 ),
             ).model_dump()
         )
+        state["errors"] = errors
+
+    except ValueError:
+        # Budget exceeded — check_budget() raised ValueError
+        errors = state.get("errors", [])
+        errors.append(make_budget_exceeded_error("query_understander").model_dump())
         state["errors"] = errors
 
     except Exception as exc:
