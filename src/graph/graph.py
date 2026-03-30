@@ -23,6 +23,7 @@ requirements covered:
 from __future__ import annotations
 
 import time
+from typing import Any
 
 import langwatch
 from langgraph.graph import StateGraph, START, END
@@ -34,6 +35,8 @@ from src.nodes.evaluator import evaluator_node
 from src.nodes.reranker import reranker_node
 from src.utils.langwatch_tracker import annotate_node_span
 from src.utils.logger import get_logger, log_node_exit
+from src.utils.config import get_settings
+from src.utils.state_display import state_delta
 
 logger = get_logger(__name__)
 
@@ -206,7 +209,7 @@ def compile_graph():
 # ══════════════════════════════════════════════════════════════════════════════
 
 @langwatch.trace()
-def run_search(query: str) -> dict:
+def run_search_with_trace(query: str) -> tuple[dict, list[dict]]:
     """
     The main entry point for running a search query through the pipeline.
 
@@ -218,19 +221,36 @@ def run_search(query: str) -> dict:
       5. The final state (with results) is returned
 
     Args:
-        query: The raw search string from the user (e.g. "top rated sci-fi movies")
+        query: The raw search string from the user (e.g. "wireless earbuds under $50")
+
 
     Returns:
-        The final state dict containing search_results, quality_scores, errors, etc.
+        ``(final_state, trace)`` where each trace item is
+        ``{"node": str, "output": dict}`` — ``output`` is only the keys that
+        node added or changed compared to the state before it ran (not the full state).
     """
     logger.info("search_started", extra={"query": query})
 
-    # Build initial state — only the query is set, everything else uses defaults
     initial_state = {"query": query}
-
-    # Compile and run the graph
     app = compile_graph()
-    final_state = app.invoke(initial_state)
+    trace: list[dict] = []
+    final_state: dict | None = None
+    # LangGraph emits ``values`` (cumulative state) then ``updates`` (per node). Diff each
+    # node output against the snapshot from the prior ``values`` event.
+    last_snapshot: dict[str, Any] = dict(initial_state)
+
+    for event in app.stream(initial_state, stream_mode=["updates", "values"]):
+        mode, payload = event
+        if mode == "values":
+            final_state = payload
+            last_snapshot = dict(payload)
+        elif mode == "updates":
+            for node_name, node_output in payload.items():
+                diff = state_delta(last_snapshot, node_output)
+                trace.append({"node": node_name, "output": diff})
+
+    if final_state is None:
+        final_state = {}
 
     logger.info(
         "search_completed",
@@ -241,4 +261,21 @@ def run_search(query: str) -> dict:
         },
     )
 
+    return final_state, trace
+
+
+def run_search(query: str) -> dict:
+    """
+    The main entry point for running a search query through the pipeline.
+
+    Delegates to :func:`run_search_with_trace` (LangWatch-instrumented) and returns
+    only the final state — same behavior as before for callers like ``main.py``.
+
+    Args:
+        query: The raw search string from the user (e.g. "wireless earbuds under $50")
+
+    Returns:
+        The final state dict containing search_results, quality_scores, errors, etc.
+    """
+    final_state, _ = run_search_with_trace(query)
     return final_state
