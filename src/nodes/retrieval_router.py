@@ -4,7 +4,6 @@ import json
 import time
 from pathlib import Path
 
-from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 
 from src.models.state import (
@@ -14,6 +13,7 @@ from src.models.state import (
     ErrorSeverity,
 )
 from src.utils.config import get_settings
+from src.utils.llm import get_llm, strip_markdown_fences, extract_token_usage
 from src.utils.logger import get_logger, log_node_exit
 from src.utils.langwatch_tracker import (
     get_langwatch_callback,
@@ -111,13 +111,8 @@ def _route_with_llm(
     Returns:
         (parsed_response, prompt_tokens, completion_tokens)
     """
-    llm = ChatOpenAI(
-        model=settings.openai_model,
-        temperature=0,
-        api_key=settings.openai_api_key,
-    )
+    llm = get_llm()
 
-    # Build the user message with the intent data
     user_content = json.dumps({
         "intent_type": parsed_intent.get("type", "INFORMATIONAL"),
         "ambiguity_score": parsed_intent.get("ambiguity_score", 0.5),
@@ -126,7 +121,6 @@ def _route_with_llm(
         "language": parsed_intent.get("language", "en"),
     }, indent=2)
 
-    # If this is a retry, add the retry context
     if retry_prescription:
         user_content += "\n\n## Retry Context\n"
         user_content += json.dumps({
@@ -143,19 +137,9 @@ def _route_with_llm(
 
     response = llm.invoke(messages, config=get_langwatch_callback())
 
-    # Extract token counts
-    usage = response.response_metadata.get("token_usage", {})
-    prompt_tokens = usage.get("prompt_tokens", 0)
-    completion_tokens = usage.get("completion_tokens", 0)
+    prompt_tokens, completion_tokens = extract_token_usage(response)
 
-    # Parse JSON response
-    content = response.content.strip()
-    if content.startswith("```"):
-        content = content.split("\n", 1)[1] if "\n" in content else content[3:]
-        if content.endswith("```"):
-            content = content[:-3]
-        content = content.strip()
-
+    content = strip_markdown_fences(response.content)
     parsed = json.loads(content)
     return parsed, prompt_tokens, completion_tokens
 

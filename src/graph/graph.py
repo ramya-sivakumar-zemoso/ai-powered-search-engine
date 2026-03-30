@@ -11,8 +11,8 @@ What this file does :
     5. reranker           — re-rank results using AI for better ordering
     6. reporter           — package final results and send to user
 
-  Nodes 1-4 are fully implemented. Nodes 5-6 (reranker, reporter)
-  are stubs that will be replaced in later phases.
+  Nodes 1-5 are fully implemented. Node 6 (reporter) is a stub
+  that will be replaced in the next phase.
 
 requirements covered:
   - LangGraph StateGraph with all 6 nodes
@@ -31,6 +31,7 @@ from src.nodes.query_understander import query_understander_node
 from src.nodes.retrieval_router import retrieval_router_node
 from src.nodes.searcher import searcher_node
 from src.nodes.evaluator import evaluator_node
+from src.nodes.reranker import reranker_node
 from src.utils.langwatch_tracker import annotate_node_span
 from src.utils.logger import get_logger, log_node_exit
 
@@ -38,31 +39,14 @@ logger = get_logger(__name__)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  NODES — implemented nodes are imported, stubs remain for reranker/reporter
+#  NODES — implemented nodes are imported, stub remains for reporter
 # ══════════════════════════════════════════════════════════════════════════════
 
 # query_understander_node — imported from src.nodes.query_understander
 # retrieval_router_node   — imported from src.nodes.retrieval_router
 # searcher_node           — imported from src.nodes.searcher
 # evaluator_node          — imported from src.nodes.evaluator
-
-
-def reranker_node(state: dict) -> dict:
-    """Phase 5 will add: cross-encoder ranking + LLM explanations."""
-    start = time.perf_counter()
-
-    duration_ms = (time.perf_counter() - start) * 1000
-    log_node_exit(
-        logger, "reranker", state.get("query_hash", ""),
-        len(state.get("search_results", [])),
-        state.get("retrieval_strategy", "HYBRID"), duration_ms, 0.0,
-    )
-    annotate_node_span(
-        "reranker", len(state.get("search_results", [])),
-        state.get("retrieval_strategy", "HYBRID"), duration_ms,
-    )
-
-    return state
+# reranker_node           — imported from src.nodes.reranker
 
 
 def reporter_node(state: dict) -> dict:

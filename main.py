@@ -120,18 +120,47 @@ def _print_summary(final_state: dict) -> None:
     print(f"\n  Results Found:    {len(results)}")
 
     if results:
-        print("\n  Top Results:")
+        print("\n  Top Search Results (Meilisearch):")
         for i, r in enumerate(results[:5], 1):
             title = r.get("title", "Untitled") if isinstance(r, dict) else "?"
             score = r.get("score", 0.0) if isinstance(r, dict) else 0.0
             print(f"    {i}. {title} (score: {score:.4f})")
+
+    # ── Section 3b: Reranked Results ──────────────────────────────────────
+    reranked = final_state.get("reranked_results", [])
+    if reranked:
+        print(f"\n  Reranked Results ({len(reranked)} via cross-encoder):")
+        for r in reranked[:5]:
+            title = r.get("id", "?")
+            orig = r.get("original_rank", "?")
+            new = r.get("new_rank", "?")
+            conf = r.get("confidence", 0.0)
+            status = r.get("explanation_status", "ABSENT")
+            expl = r.get("explanation", "")
+            print(f"    #{new}. id={title} (was #{orig}, conf: {conf:.4f}, {status})")
+            if expl:
+                print(f"         → {expl[:100]}{'...' if len(expl) > 100 else ''}")
 
     # ── Section 4: Pipeline Metrics ───────────────────────────────────────
     print(f"\n  Iterations:       {final_state.get('iteration_count', 0)}")
     print(f"  Evaluator:        {final_state.get('evaluator_decision', 'N/A')}")
     cost = final_state.get("cumulative_token_cost", 0.0)
     print(f"  Token Cost:       ${cost:.6f}")
-    print(f"  Reranked:         {len(final_state.get('reranked_results', []))}")
+    print(f"  Reranked:         {len(reranked)}")
+
+    # ── Section 4b: Quality Scores (all 5 signals) ────────────────────────
+    q = final_state.get("quality_scores", {})
+    if q:
+        print("\n  Quality Scores:")
+        print(f"    Semantic Relevance:  {q.get('semantic_relevance', 'N/A')}")
+        print(f"    Result Coverage:     {q.get('result_coverage', 'N/A')}")
+        print(f"    Ranking Stability:   {q.get('ranking_stability', 'N/A')}")
+        print(f"    Freshness Signal:    {q.get('freshness_signal', 'N/A')}")
+        print(f"    Combined (4-sig):    {q.get('combined', 'N/A')}")
+        if "rerank_confidence" in q:
+            print(f"    Rerank Confidence:   {q.get('rerank_confidence', 'N/A')}")
+            pct = q.get("rerank_low_confidence_ratio", 0.0)
+            print(f"    Low Conf (<0.5):     {pct:.0%} of results")
 
     # ── Section 5: Freshness ──────────────────────────────────────────────
     freshness = final_state.get("freshness_metadata", {})
