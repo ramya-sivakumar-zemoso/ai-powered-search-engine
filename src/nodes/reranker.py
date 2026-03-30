@@ -10,7 +10,7 @@ What this node does (plain English):
   5. Audits each explanation to check it cites real result content
   6. Writes reranked_results to state as RankedResult objects
 
-Cross-encoder: cross-encoder/ms-marco-MiniLM-L-6-v2
+Cross-encoder: configurable via RERANKER_MODEL in .env (default: ms-marco-MiniLM-L-6-v2)
   - Lightweight (~80MB), runs on CPU, no API key needed
   - Reads (query, result_text) pairs and outputs relevance logits
   - We apply sigmoid to convert logits to 0-1 confidence scores
@@ -39,7 +39,6 @@ import math
 import time
 from pathlib import Path
 
-from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 
 from src.models.state import (
@@ -50,6 +49,7 @@ from src.models.state import (
     TokenUsage,
 )
 from src.utils.config import get_settings
+from src.utils.llm import get_llm, strip_markdown_fences, extract_token_usage
 from src.utils.logger import get_logger, log_node_exit
 from src.utils.langwatch_tracker import (
     get_langwatch_callback,
@@ -61,10 +61,9 @@ from src.utils.langwatch_tracker import (
 logger = get_logger(__name__)
 settings = get_settings()
 
-CROSS_ENCODER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
-
 # Lazy-loaded cross-encoder instance (avoids slow import on every startup)
 _cross_encoder_instance = None
+_cross_encoder_model_name = None
 
 PROMPT_PATH = Path(__file__).resolve().parent.parent / "prompts" / "reranker_explanation.txt"
 SYSTEM_PROMPT = PROMPT_PATH.read_text(encoding="utf-8")
@@ -78,15 +77,18 @@ def _get_cross_encoder():
     """Load the cross-encoder model on first use (lazy singleton).
 
     The model is downloaded from HuggingFace on first invocation (~80MB).
-    Subsequent calls return the cached instance.
+    Subsequent calls return the cached instance. If RERANKER_MODEL changes
+    in .env, a restart is needed (lru_cache on settings).
     """
-    global _cross_encoder_instance
-    if _cross_encoder_instance is None:
+    global _cross_encoder_instance, _cross_encoder_model_name
+    model_name = settings.reranker_model
+    if _cross_encoder_instance is None or _cross_encoder_model_name != model_name:
         from sentence_transformers import CrossEncoder
 
-        logger.info("loading_cross_encoder", extra={"model": CROSS_ENCODER_MODEL})
-        _cross_encoder_instance = CrossEncoder(CROSS_ENCODER_MODEL)
-        logger.info("cross_encoder_loaded", extra={"model": CROSS_ENCODER_MODEL})
+        logger.info("loading_cross_encoder", extra={"model": model_name})
+        _cross_encoder_instance = CrossEncoder(model_name)
+        _cross_encoder_model_name = model_name
+        logger.info("cross_encoder_loaded", extra={"model": model_name})
     return _cross_encoder_instance
 
 
@@ -179,32 +181,19 @@ def _generate_explanations(
     results_context = _build_results_context(ranked_results)
     human_content = f"Query: {query}\n\nResults:\n{results_context}"
 
-    llm = ChatOpenAI(
-        model=settings.openai_model,
-        temperature=0,
-        api_key=settings.openai_api_key,
-    )
+    llm = get_llm()
 
     messages = [
         SystemMessage(content=SYSTEM_PROMPT),
         HumanMessage(content=human_content),
     ]
 
-    callback_config = get_langwatch_callback()
-    response = llm.invoke(messages, config=callback_config)
+    response = llm.invoke(messages, config=get_langwatch_callback())
 
-    text = response.content.strip()
-    if text.startswith("```"):
-        text = text.split("\n", 1)[1] if "\n" in text else text[3:]
-        if text.endswith("```"):
-            text = text[:-3]
-        text = text.strip()
-
+    text = strip_markdown_fences(response.content)
     explanations = json.loads(text)
 
-    usage = response.usage_metadata or {}
-    prompt_tokens = usage.get("input_tokens", 0)
-    completion_tokens = usage.get("output_tokens", 0)
+    prompt_tokens, completion_tokens = extract_token_usage(response)
 
     return explanations, prompt_tokens, completion_tokens
 

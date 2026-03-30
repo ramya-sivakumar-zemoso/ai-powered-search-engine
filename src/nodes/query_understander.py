@@ -5,7 +5,6 @@ import json
 import time
 from pathlib import Path
 
-from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 
 from src.models.state import (
@@ -18,6 +17,7 @@ from src.models.state import (
     RetrievalStrategy,
 )
 from src.utils.config import get_settings
+from src.utils.llm import get_llm, strip_markdown_fences, extract_token_usage
 from src.utils.logger import get_logger, log_node_exit, log_injection_detection
 from src.utils.langwatch_tracker import (
     get_langwatch_callback,
@@ -34,6 +34,9 @@ settings = get_settings()
 # Any change to this prompt is a version bump (Working Flow doc requirement).
 PROMPT_PATH = Path(__file__).resolve().parent.parent / "prompts" / "intent_parse.txt"
 SYSTEM_PROMPT = PROMPT_PATH.read_text(encoding="utf-8")
+
+# Lazy-cached injection scanner (avoids reloading ~400MB model on every call)
+_injection_scanner = None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -58,16 +61,15 @@ def _scan_for_injection(query: str) -> tuple[bool, float]:
         - risk_score: How confident the scanner is that this is an injection (0.0 to 1.0)
     """
     try:
-        from llm_guard.input_scanners import PromptInjection
+        global _injection_scanner
+        if _injection_scanner is None:
+            from llm_guard.input_scanners import PromptInjection
 
-        # Create scanner with threshold from .env (INJECTION_SCAN_THRESHOLD=0.85)
-        scanner = PromptInjection(threshold=settings.injection_scan_threshold)
+            _injection_scanner = PromptInjection(
+                threshold=settings.injection_scan_threshold,
+            )
 
-        # scan() returns: (sanitized_output, is_valid, risk_score)
-        # - sanitized_output: cleaned version of query (not used here)
-        # - is_valid: True if query is safe (below threshold)
-        # - risk_score: confidence that this is an injection attempt
-        _sanitized, is_valid, risk_score = scanner.scan(query)
+        _sanitized, is_valid, risk_score = _injection_scanner.scan(query)
 
         logger.info(
             "injection_scan_complete",
@@ -109,39 +111,18 @@ def _parse_intent_with_llm(query: str) -> tuple[dict, int, int]:
         - prompt_tokens: Number of input tokens used (for cost tracking)
         - completion_tokens: Number of output tokens used (for cost tracking)
     """
-    # Create the LLM client with settings from .env
-    llm = ChatOpenAI(
-        model=settings.openai_model,       # "gpt-4o-mini" from .env
-        temperature=0,                      # Deterministic output (PRD Section 5)
-        api_key=settings.openai_api_key,   # From OPENAI_API_KEY in .env
-    )
+    llm = get_llm()
 
-    # Build the message list — system prompt defines the rules, human message is the query
     messages = [
         SystemMessage(content=SYSTEM_PROMPT),
         HumanMessage(content=query),
     ]
 
-    # Invoke GPT with LangWatch callback so the call appears on the dashboard
     response = llm.invoke(messages, config=get_langwatch_callback())
 
-    # Extract token counts from GPT's response metadata
-    usage = response.response_metadata.get("token_usage", {})
-    prompt_tokens = usage.get("prompt_tokens", 0)
-    completion_tokens = usage.get("completion_tokens", 0)
+    prompt_tokens, completion_tokens = extract_token_usage(response)
 
-    # Parse the JSON from GPT's response text
-    content = response.content.strip()
-
-    # GPT sometimes wraps JSON in markdown code fences — remove them
-    if content.startswith("```"):
-        # Remove opening fence (e.g. "```json\n")
-        content = content.split("\n", 1)[1] if "\n" in content else content[3:]
-        # Remove closing fence
-        if content.endswith("```"):
-            content = content[:-3]
-        content = content.strip()
-
+    content = strip_markdown_fences(response.content)
     parsed = json.loads(content)
     return parsed, prompt_tokens, completion_tokens
 
