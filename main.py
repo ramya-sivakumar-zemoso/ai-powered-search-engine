@@ -95,7 +95,13 @@ def _print_header(query: str, demo_name: str | None) -> None:
 
 
 def _print_summary(final_state: dict) -> None:
-    """Prints a clean, human-readable summary of the pipeline run."""
+    """Prints a clean, human-readable summary of the pipeline run.
+
+    Uses the structured final_response assembled by the reporter node.
+    Falls back to raw state keys if final_response is missing (e.g. during
+    early development when reporter is not wired).
+    """
+    resp = final_state.get("final_response", {})
 
     print("\n" + "=" * 70)
     print("  PIPELINE RESULTS")
@@ -103,8 +109,8 @@ def _print_summary(final_state: dict) -> None:
 
     # ── Section 1: Query Understanding ────────────────────────────────────
     intent = final_state.get("parsed_intent", {})
-    print(f"\n  Query:            {final_state.get('query', '')}")
-    print(f"  Query Hash:       {final_state.get('query_hash', '')}")
+    print(f"\n  Query:            {resp.get('query', final_state.get('query', ''))}")
+    print(f"  Query Hash:       {resp.get('query_hash', final_state.get('query_hash', ''))}")
     print(f"  Intent Type:      {intent.get('type', '?')}")
     print(f"  Entities:         {intent.get('entities', [])}")
     print(f"  Filters:          {intent.get('filters', {})}")
@@ -112,16 +118,17 @@ def _print_summary(final_state: dict) -> None:
     print(f"  Language:         {intent.get('language', '?')}")
 
     # ── Section 2: Routing ────────────────────────────────────────────────
-    print(f"\n  Strategy:         {final_state.get('retrieval_strategy', '?')}")
-    print(f"  Router Reasoning: {final_state.get('router_reasoning', 'N/A')}")
+    meta = resp.get("pipeline_metadata", {})
+    print(f"\n  Strategy:         {meta.get('strategy', final_state.get('retrieval_strategy', '?'))}")
+    print(f"  Router Reasoning: {meta.get('router_reasoning', final_state.get('router_reasoning', 'N/A'))}")
 
     # ── Section 3: Search Results ─────────────────────────────────────────
-    results = final_state.get("search_results", [])
-    print(f"\n  Results Found:    {len(results)}")
+    raw_results = final_state.get("search_results", [])
+    print(f"\n  Raw Results:      {len(raw_results)}")
 
-    if results:
+    if raw_results:
         print("\n  Top Search Results (Meilisearch):")
-        for i, r in enumerate(results[:5], 1):
+        for i, r in enumerate(raw_results[:5], 1):
             title = r.get("title", "Untitled") if isinstance(r, dict) else "?"
             score = r.get("score", 0.0) if isinstance(r, dict) else 0.0
             print(f"    {i}. {title} (score: {score:.4f})")
@@ -142,14 +149,29 @@ def _print_summary(final_state: dict) -> None:
                 print(f"         → {expl[:100]}{'...' if len(expl) > 100 else ''}")
 
     # ── Section 4: Pipeline Metrics ───────────────────────────────────────
-    print(f"\n  Iterations:       {final_state.get('iteration_count', 0)}")
-    print(f"  Evaluator:        {final_state.get('evaluator_decision', 'N/A')}")
-    cost = final_state.get("cumulative_token_cost", 0.0)
-    print(f"  Token Cost:       ${cost:.6f}")
-    print(f"  Reranked:         {len(reranked)}")
+    print(f"\n  Result Source:    {resp.get('result_source', 'N/A')}")
+    print(f"  Final Count:      {resp.get('result_count', len(raw_results))}")
+    print(f"  Iterations:       {meta.get('iterations', final_state.get('iteration_count', 0))}")
+    print(f"  Evaluator:        {meta.get('evaluator_decision', final_state.get('evaluator_decision', 'N/A'))}")
+    print(f"  Filter Relaxed:   {meta.get('filter_relaxation_applied', False)}")
 
-    # ── Section 4b: Quality Scores (all 5 signals) ────────────────────────
-    q = final_state.get("quality_scores", {})
+    # ── Section 4b: Cost Summary (from reporter) ──────────────────────────
+    cost_info = resp.get("cost_summary", {})
+    total_cost = cost_info.get("total_cost_usd", final_state.get("cumulative_token_cost", 0.0))
+    print(f"\n  Token Cost:       ${total_cost:.6f}")
+    print(f"  Prompt Tokens:    {cost_info.get('total_prompt_tokens', '?')}")
+    print(f"  Completion Tkns:  {cost_info.get('total_completion_tokens', '?')}")
+
+    per_node = cost_info.get("per_node", [])
+    if per_node:
+        print("  Per-Node Breakdown:")
+        for entry in per_node:
+            print(f"    {entry['node']:22s}  prompt={entry['prompt_tokens']:>5}  "
+                  f"compl={entry['completion_tokens']:>5}  "
+                  f"cost=${entry['cost_usd']:.8f}")
+
+    # ── Section 4c: Quality Scores ────────────────────────────────────────
+    q = resp.get("quality_summary", final_state.get("quality_scores", {}))
     if q:
         print("\n  Quality Scores:")
         print(f"    Semantic Relevance:  {q.get('semantic_relevance', 'N/A')}")
@@ -163,35 +185,41 @@ def _print_summary(final_state: dict) -> None:
             print(f"    Low Conf (<0.5):     {pct:.0%} of results")
 
     # ── Section 5: Freshness ──────────────────────────────────────────────
-    freshness = final_state.get("freshness_metadata", {})
+    freshness = resp.get("freshness_report", final_state.get("freshness_metadata", {}))
     if freshness:
         stale_count = len(freshness.get("stale_result_ids", []))
         print(f"\n  Stale Results:    {stale_count}")
         if freshness.get("staleness_flag"):
             print(f"  Max Staleness:    {freshness.get('max_staleness_seconds', 0):.0f}s")
 
-    # ── Section 6: Errors / Warnings ──────────────────────────────────────
-    errors = final_state.get("errors", [])
-    if errors:
-        print(f"\n  Warnings/Errors:  {len(errors)}")
-        for e in errors:
-            if isinstance(e, dict):
-                severity = e.get("severity", "?")
-                node = e.get("node", "?")
-                msg = e.get("message", "?")
-                desc = e.get("fallback_description", "")
-                print(f"    [{severity}] {node}: {msg}")
-                if desc:
-                    print(f"            → {desc}")
+    # ── Section 6: Warnings ───────────────────────────────────────────────
+    warnings_list = resp.get("warnings", [])
+    if not warnings_list:
+        errors = final_state.get("errors", [])
+        warnings_list = [
+            {"severity": e.get("severity", "?"), "node": e.get("node", "?"),
+             "message": e.get("message", "?"), "detail": e.get("fallback_description", "")}
+            for e in errors if isinstance(e, dict)
+        ]
+
+    if warnings_list:
+        print(f"\n  Warnings/Errors:  {len(warnings_list)}")
+        for w in warnings_list:
+            print(f"    [{w.get('severity', '?')}] {w.get('node', '?')}: {w.get('message', '?')}")
+            detail = w.get("detail", "")
+            if detail:
+                print(f"            → {detail}")
 
     # ── Final verdict ─────────────────────────────────────────────────────
+    blocked = resp.get("blocked", False)
+    result_count = resp.get("result_count", len(raw_results))
+
     print("\n" + "=" * 70)
-    if errors and any(
-        e.get("message") == "INJECTION_DETECTED" for e in errors if isinstance(e, dict)
-    ):
+    if blocked:
         print("  RESULT: Query BLOCKED — prompt injection detected.")
-    elif len(results) > 0:
-        print(f"  RESULT: {len(results)} results returned successfully.")
+    elif result_count > 0:
+        source = resp.get("result_source", "search")
+        print(f"  RESULT: {result_count} results returned ({source}).")
     else:
         print("  RESULT: Pipeline complete — 0 results (check query or data).")
     print("=" * 70 + "\n")
