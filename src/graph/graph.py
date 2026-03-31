@@ -32,6 +32,7 @@ from src.nodes.retrieval_router import retrieval_router_node
 from src.nodes.searcher import searcher_node
 from src.nodes.evaluator import evaluator_node
 from src.nodes.reranker import reranker_node
+from src.nodes.reporter import reporter_node
 from src.utils.langwatch_tracker import annotate_node_span
 from src.utils.logger import get_logger, log_node_exit
 from src.utils.config import get_settings
