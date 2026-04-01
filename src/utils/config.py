@@ -61,7 +61,7 @@ def get_settings() -> Settings:
         openai_api_key=os.getenv("OPENAI_API_KEY", ""),
         openai_model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
         # ── Embeddings ───────────────────────────────────────
-        embedding_model=os.getenv("EMBEDDING_MODEL", "BAAI/bge-large-en"),
+        embedding_model=os.getenv("EMBEDDING_MODEL", "intfloat/multilingual-e5-large"),
         embedding_dimensions=int(os.getenv("EMBEDDING_DIMENSIONS", "1024")),
         # ── LangWatch ───────────────────────────────────────
         langwatch_enabled=os.getenv("LANGWATCH_ENABLED", "false").lower() == "true",
@@ -71,7 +71,7 @@ def get_settings() -> Settings:
         max_search_iterations=int(os.getenv("MAX_SEARCH_ITERATIONS", "3")),
         token_budget_usd=float(os.getenv("TOKEN_BUDGET_USD", "0.02")),
         reranker_top_n=int(os.getenv("RERANKER_TOP_N", "10")),
-        reranker_model=os.getenv("RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2"),
+        reranker_model=os.getenv("RERANKER_MODEL", "cross-encoder/ms-marco-multilingual-L12-v2"),
         confidence_threshold_degraded=float(os.getenv("CONFIDENCE_THRESHOLD_DEGRADED", "0.30")),
         near_duplicate_threshold=float(os.getenv("NEAR_DUPLICATE_THRESHOLD", "0.92")),
         # ── Injection detection ──────────────────────────────

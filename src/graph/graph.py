@@ -32,6 +32,7 @@ from src.nodes.retrieval_router import retrieval_router_node
 from src.nodes.searcher import searcher_node
 from src.nodes.evaluator import evaluator_node
 from src.nodes.reranker import reranker_node
+from src.nodes.reporter import reporter_node
 from src.utils.langwatch_tracker import annotate_node_span
 from src.utils.logger import get_logger, log_node_exit
 from src.utils.config import get_settings
@@ -185,6 +186,10 @@ def compile_graph():
     return graph.compile()
 
 
+# Compile once at module level — avoids rebuilding the graph on every request.
+_compiled_app = compile_graph()
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  ENTRY POINT — wraps graph invocation with LangWatch tracing
 # ══════════════════════════════════════════════════════════════════════════════
@@ -213,7 +218,7 @@ def run_search_with_trace(query: str) -> tuple[dict, list[dict]]:
     logger.info("search_started", extra={"query": query})
 
     initial_state = {"query": query}
-    app = compile_graph()
+    app = _compiled_app
     trace: list[dict] = []
     final_state: dict | None = None
     # LangGraph emits ``values`` (cumulative state) then ``updates`` (per node). Diff each
