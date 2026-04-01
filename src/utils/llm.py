@@ -14,6 +14,8 @@ _llm_instance: ChatOpenAI | None = None
 
 # Max output tokens per LLM call — prevents runaway cost from long outputs
 LLM_MAX_TOKENS = 1024
+LLM_REQUEST_TIMEOUT = 30
+LLM_MAX_RETRIES = 2
 
 
 def get_llm() -> ChatOpenAI:
@@ -22,6 +24,8 @@ def get_llm() -> ChatOpenAI:
     Uses settings from .env: OPENAI_MODEL, OPENAI_API_KEY.
     temperature=0 for deterministic output (PRD Section 5).
     max_tokens capped to prevent unexpected cost spikes.
+    request_timeout prevents hung requests in production.
+    max_retries handles transient OpenAI API failures.
     """
     global _llm_instance
     if _llm_instance is None:
@@ -30,6 +34,8 @@ def get_llm() -> ChatOpenAI:
             temperature=0,
             api_key=settings.openai_api_key,
             max_tokens=LLM_MAX_TOKENS,
+            request_timeout=LLM_REQUEST_TIMEOUT,
+            max_retries=LLM_MAX_RETRIES,
         )
         logger.info(
             "llm_client_initialized",
