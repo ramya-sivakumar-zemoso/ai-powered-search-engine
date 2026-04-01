@@ -278,6 +278,54 @@ def _compute_quality_score(state: dict) -> dict[str, float]:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  HELPER: Detect near-duplicate query variants via Jaccard similarity
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _is_near_duplicate_variant(
+    current_variant: str,
+    search_history: list[dict],
+) -> bool:
+    """Check if the current query variant is a near-duplicate of a previous one.
+
+    Uses token-level Jaccard similarity: ``|intersection| / |union|``.
+    No model needed — fast set arithmetic on lowercased word tokens.
+
+    If Jaccard >= ``near_duplicate_threshold`` (default 0.92 from config),
+    the variant is considered a near-duplicate and retrying would produce
+    the same results.
+
+    Args:
+        current_variant: The query variant for the current attempt.
+        search_history: List of previous SearchAttempt dicts.
+
+    Returns:
+        True if a near-duplicate variant exists in history.
+    """
+    current_tokens = set(current_variant.lower().split())
+    if not current_tokens:
+        return False
+
+    threshold = settings.near_duplicate_threshold
+
+    for attempt in search_history:
+        if not isinstance(attempt, dict):
+            continue
+        prev_variant = attempt.get("query_variant", "")
+        prev_tokens = set(prev_variant.lower().split())
+        if not prev_tokens:
+            continue
+
+        intersection = current_tokens & prev_tokens
+        union = current_tokens | prev_tokens
+        jaccard = len(intersection) / len(union) if union else 0.0
+
+        if jaccard >= threshold:
+            return True
+
+    return False
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  HELPER: Build retry prescription
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -374,18 +422,22 @@ def evaluator_node(state: dict) -> dict:
         state: The pipeline state dict.
 
     Returns:
-        Updated state dict with evaluator_decision, quality_scores, etc.
+        Dict of only the keys this node changed.
     """
     start = time.perf_counter()
     query_hash = state.get("query_hash", "")
 
+    updates: dict = {}
+    new_errors: list[dict] = []
+    new_search_history: list[dict] = []
+
     # ── Step 1: Increment iteration counter ───────────────────────────────
     iteration = state.get("iteration_count", 0) + 1
-    state["iteration_count"] = iteration
+    updates["iteration_count"] = iteration
 
     # ── Step 2: Compute quality scores ────────────────────────────────────
     quality_scores = _compute_quality_score(state)
-    state["quality_scores"] = quality_scores
+    updates["quality_scores"] = quality_scores
     combined = quality_scores["combined"]
 
     # ── Step 3: Make the decision ─────────────────────────────────────────
@@ -403,23 +455,34 @@ def evaluator_node(state: dict) -> dict:
     else:
         decision = "exhausted"
 
-    state["evaluator_decision"] = decision
+    # ── Step 3b: Near-duplicate guard (PRD 4.5) ──────────────────────────
+    # Before committing to a retry, check if the current query variant is
+    # a near-duplicate of a previously tried variant.  If so, retrying would
+    # produce the same results — force "exhausted" instead.
+    intent = state.get("parsed_intent", {})
+    entities = intent.get("entities", [])
+    query_variant = " ".join(entities) if entities else state.get("query", "")
+    search_history = state.get("search_history", [])
+
+    if decision == "retry" and _is_near_duplicate_variant(query_variant, search_history):
+        logger.info(
+            "near_duplicate_variant_detected",
+            extra={"query_variant": query_variant, "action": "forcing exhausted"},
+        )
+        decision = "exhausted"
+
+    updates["evaluator_decision"] = decision
 
     # ── Step 4: If retry → build prescription + record attempt ────────────
     if decision == "retry":
         prescription = _build_retry_prescription(
             quality_scores,
             strategy,
-            state.get("search_history", []),
+            search_history,
         )
-        state["retry_prescription"] = prescription.model_dump()
+        updates["retry_prescription"] = prescription.model_dump()
 
-    history = state.get("search_history", [])
-    intent = state.get("parsed_intent", {})
-    entities = intent.get("entities", [])
-    query_variant = " ".join(entities) if entities else state.get("query", "")
-
-    history.append(
+    new_search_history.append(
         SearchAttempt(
             strategy=RetrievalStrategy(strategy) if strategy in ("KEYWORD", "SEMANTIC", "HYBRID") else RetrievalStrategy.HYBRID,
             query_variant=query_variant,
@@ -427,12 +490,10 @@ def evaluator_node(state: dict) -> dict:
             result_count=len(results),
         ).model_dump()
     )
-    state["search_history"] = history
 
     # ── Step 5: Log exhausted as a warning ────────────────────────────────
     if decision == "exhausted":
-        errors = state.get("errors", [])
-        errors.append(
+        new_errors.append(
             ExtractionError(
                 node="evaluator",
                 severity=ErrorSeverity.WARNING,
@@ -445,7 +506,6 @@ def evaluator_node(state: dict) -> dict:
                 ),
             ).model_dump()
         )
-        state["errors"] = errors
 
     # ── Step 6: Log and annotate node exit ────────────────────────────────
     duration_ms = (time.perf_counter() - start) * 1000
@@ -472,4 +532,9 @@ def evaluator_node(state: dict) -> dict:
         },
     )
 
-    return state
+    if new_errors:
+        updates["errors"] = new_errors
+    if new_search_history:
+        updates["search_history"] = new_search_history
+
+    return updates

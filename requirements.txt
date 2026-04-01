@@ -6,7 +6,8 @@ langchain-openai==1.0.3
 # Observability
 langwatch==0.13.0
 
-# Search backend (Meilisearch REST client)
+# Search backend (official Meilisearch Python SDK)
+meilisearch>=0.31.0
 requests==2.32.3
 
 # Embeddings + reranker 

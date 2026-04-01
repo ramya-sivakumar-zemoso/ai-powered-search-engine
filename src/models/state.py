@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import operator
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any
+from typing import Annotated, Any, TypedDict
 
 from pydantic import BaseModel, Field
 
@@ -131,3 +132,43 @@ class SearchState(BaseModel):
     freshness_metadata: FreshnessReport = Field(default_factory=FreshnessReport)
     # Errors (PRD Section 4.2)
     errors: list[ExtractionError] = Field(default_factory=list)
+
+
+# ── TypedDict state for LangGraph ─────────────────────────────────────────────
+# LangGraph 1.x requires TypedDict (not Pydantic BaseModel) as the state
+# schema for StateGraph. Fields annotated with ``operator.add`` are
+# *accumulated* (LangGraph merges new items via ``+``); all others are
+# overwritten on each node return.  Nodes MUST return only the *new* items
+# for accumulated list fields — not the full list.
+
+class SearchStateDict(TypedDict, total=False):
+    """Typed graph state consumed by ``StateGraph(SearchStateDict)``."""
+    # ── identity ──
+    query: str
+    query_hash: str
+    # ── query_understander output ──
+    parsed_intent: dict
+    # ── retrieval_router output ──
+    retrieval_strategy: str
+    hybrid_weights: dict[str, float]
+    router_reasoning: str
+    # ── searcher output ──
+    search_results: list[dict]
+    filter_relaxation_applied: bool
+    # ── reranker output ──
+    reranked_results: list[dict]
+    # ── evaluator output ──
+    quality_scores: dict[str, float]
+    evaluator_decision: str
+    retry_prescription: dict | None
+    iteration_count: int
+    # ── accumulated lists (operator.add reducer) ──
+    search_history: Annotated[list, operator.add]
+    token_usage: Annotated[list, operator.add]
+    errors: Annotated[list, operator.add]
+    # ── budget tracking ──
+    cumulative_token_cost: float
+    # ── freshness ──
+    freshness_metadata: dict
+    # ── reporter output ──
+    final_response: dict

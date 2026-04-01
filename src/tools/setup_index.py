@@ -1,13 +1,13 @@
-"""Create index, set attributes + HuggingFace embedder, batch documents, wait for embeddings."""
+"""Create index, set attributes + HuggingFace embedder, batch documents, wait for embeddings.
+
+Uses the official ``meilisearch`` Python SDK for all API calls.
+"""
 from __future__ import annotations
 
 import argparse
 import os
 import sys
-import time
 from pathlib import Path
-
-import requests
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
@@ -18,8 +18,7 @@ load_dotenv()
 from src.models.schema_registry import get_schema
 from src.tools.dataset_loader import load_and_normalise
 from src.tools.meilisearch_client import (
-    _headers,
-    _url,
+    _get_client,
     get_index_stats,
     health,
     wait_for_task,
@@ -30,75 +29,60 @@ settings = get_settings()
 
 
 def create_index(index_name: str) -> dict:
-    resp = requests.post(
-        _url("/indexes"),
-        headers=_headers(),
-        json={"uid": index_name, "primaryKey": "id"},
-    )
-    if resp.status_code == 409:
-        print(f"  Index '{index_name}' already exists — skipping.")
-        return {}
-    resp.raise_for_status()
-    task = resp.json()
+    """Create a Meilisearch index (idempotent — skips if it already exists)."""
+    client = _get_client()
     try:
-        wait_for_task(task["taskUid"], interval=2)
-    except RuntimeError as exc:
-        if "already exists" in str(exc).lower():
+        task_info = client.create_index(index_name, {"primaryKey": "id"})
+        task_uid = task_info.task_uid
+        wait_for_task(task_uid, interval=2)
+        return {"taskUid": task_uid}
+    except Exception as exc:
+        if "already exists" in str(exc).lower() or "index_already_exists" in str(exc).lower():
             print(f"  Index '{index_name}' already exists — skipping.")
             return {}
         raise
-    return task
 
 
 def configure_attributes(index_name: str, schema) -> None:
-    base = _url(f"/indexes/{index_name}/settings")
+    """Set searchable, filterable, and sortable attributes on the index."""
+    index = _get_client().index(index_name)
+
     parts = [
-        ("searchable-attributes", schema.searchable_fields, "Searchable"),
-        ("filterable-attributes", schema.filterable_fields, "Filterable"),
-        ("sortable-attributes", schema.sortable_fields, "Sortable"),
+        (index.update_searchable_attributes, schema.searchable_fields, "Searchable"),
+        (index.update_filterable_attributes, schema.filterable_fields, "Filterable"),
+        (index.update_sortable_attributes, schema.sortable_fields, "Sortable"),
     ]
-    for suffix, payload, label in parts:
-        resp = requests.put(
-            f"{base}/{suffix}",
-            headers=_headers(),
-            json=payload,
-        )
-        resp.raise_for_status()
-        wait_for_task(resp.json()["taskUid"], interval=2)
+    for update_fn, payload, label in parts:
+        task_info = update_fn(payload)
+        wait_for_task(task_info.task_uid, interval=2)
         print(f"  {label}: {payload}")
 
 
 def configure_embedder(index_name: str, schema) -> dict:
-    resp = requests.patch(
-        _url(f"/indexes/{index_name}/settings/embedders"),
-        headers=_headers(),
-        json={
-            settings.meili_embedder_name: {
-                "source": "huggingFace",
-                "model": settings.embedding_model,
-                "documentTemplate": schema.embedder_template,
-            }
-        },
-    )
-    resp.raise_for_status()
-    task = resp.json()
+    """Configure the HuggingFace embedder on the index."""
+    index = _get_client().index(index_name)
+    embedder_config = {
+        settings.meili_embedder_name: {
+            "source": "huggingFace",
+            "model": settings.embedding_model,
+            "documentTemplate": schema.embedder_template,
+        }
+    }
+    task_info = index.update_embedders(embedder_config)
     print(f"  Embedder '{settings.meili_embedder_name}' configured.")
     print(f"  Template: {schema.embedder_template}")
-    return task
+    return {"taskUid": task_info.task_uid}
 
 
 def add_documents(index_name: str, documents: list[dict]) -> None:
+    """Add documents in batches of 500."""
+    index = _get_client().index(index_name)
     batch_size = 500
     total = len(documents)
     for i in range(0, total, batch_size):
         batch = documents[i : i + batch_size]
-        resp = requests.post(
-            _url(f"/indexes/{index_name}/documents"),
-            headers=_headers(),
-            json=batch,
-        )
-        resp.raise_for_status()
-        task_uid = resp.json()["taskUid"]
+        task_info = index.add_documents(batch)
+        task_uid = task_info.task_uid
         batch_num = i // batch_size + 1
         total_batches = (total + batch_size - 1) // batch_size
         print(f"  Batch {batch_num}/{total_batches} → task {task_uid}")
@@ -111,7 +95,7 @@ def setup(
     limit: int | None = None,
     reset: bool = False,
 ) -> None:
-    _ = reset  # CLI flag preserved; same as prior version (no drop-index step yet)
+    _ = reset
     index_name = settings.meili_index_name
 
     print("\n── Checking Meilisearch ──────────────────────────────────────")
@@ -143,7 +127,7 @@ def setup(
     add_documents(index_name, documents)
 
     print("\n── Waiting for embedding generation ─────────────────────────")
-    print("  bge-large-en will be downloaded on first run (~1.3 GB).")
+    print("  Embedding model will be downloaded on first run.")
     print("  This can take 5–30 minutes depending on connection and CPU.")
     wait_for_task(embedder_task["taskUid"], interval=10, timeout=3600)
 

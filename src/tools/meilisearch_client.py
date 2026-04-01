@@ -1,12 +1,21 @@
-"""REST client for Meilisearch: search (with retries + hybrid fallback), stats, tasks."""
+"""Meilisearch client — search (with retries + hybrid fallback), stats, tasks.
+
+Uses the official ``meilisearch`` Python SDK for all API calls.
+Retry logic and hybrid-to-keyword fallback are layered on top because
+the SDK does not provide these out of the box.
+"""
 from __future__ import annotations
 
 import asyncio
 import time
 from typing import Any
 
-import requests
-from requests.exceptions import ConnectionError, Timeout
+import meilisearch
+from meilisearch.errors import (
+    MeilisearchApiError,
+    MeilisearchCommunicationError,
+    MeilisearchTimeoutError,
+)
 
 from src.utils.config import get_settings
 from src.utils.logger import get_logger
@@ -14,19 +23,23 @@ from src.utils.logger import get_logger
 logger = get_logger(__name__)
 settings = get_settings()
 
-
-def _headers() -> dict[str, str]:
-    return {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {settings.meili_master_key}",
-    }
+# Lazy-initialised SDK client (singleton)
+_client: meilisearch.Client | None = None
 
 
-def _url(path: str) -> str:
-    return f"{settings.meili_url}{path}"
+def _get_client() -> meilisearch.Client:
+    """Return a lazily-created Meilisearch SDK client."""
+    global _client
+    if _client is None:
+        _client = meilisearch.Client(
+            settings.meili_url,
+            settings.meili_master_key,
+        )
+    return _client
 
 
 def _norm(data: dict[str, Any], strategy: str, partial: bool) -> dict[str, Any]:
+    """Normalise a Meilisearch search response into our internal shape."""
     return {
         "hits": data.get("hits", []),
         "latency_ms": data.get("processingTimeMs", 0),
@@ -36,28 +49,44 @@ def _norm(data: dict[str, Any], strategy: str, partial: bool) -> dict[str, Any]:
     }
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  Health
+# ══════════════════════════════════════════════════════════════════════════════
+
 def health() -> dict[str, Any]:
-    resp = requests.get(_url("/health"), headers=_headers(), timeout=5)
-    resp.raise_for_status()
-    return resp.json()
+    """Check Meilisearch availability."""
+    return _get_client().health()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Internal: execute search with 3-retry + keyword fallback
+# ══════════════════════════════════════════════════════════════════════════════
+
+_RETRYABLE = (
+    MeilisearchCommunicationError,
+    MeilisearchTimeoutError,
+    MeilisearchApiError,
+    ConnectionError,
+    TimeoutError,
+)
 
 
 def _execute_search(
-    body: dict[str, Any],
+    query: str,
+    opt_params: dict[str, Any],
+    strategy_label: str,
     index_name: str | None = None,
 ) -> dict[str, Any]:
+    """Run a search with up to 3 retries, falling back to keyword on failure."""
     idx = index_name or settings.meili_index_name
-    url = _url(f"/indexes/{idx}/search")
-    strategy_label = body.pop("_strategy", "KEYWORD")
-    send_body = body
+    index = _get_client().index(idx)
     last_error: Exception | None = None
 
     for attempt in range(3):
         try:
-            resp = requests.post(url, headers=_headers(), json=send_body, timeout=10)
-            resp.raise_for_status()
-            return _norm(resp.json(), strategy_label, False)
-        except (ConnectionError, Timeout, requests.HTTPError) as exc:
+            result = index.search(query, opt_params)
+            return _norm(result, strategy_label, False)
+        except _RETRYABLE as exc:
             last_error = exc
             if attempt < 2:
                 wait = 0.1 * (2 ** (attempt + 1))
@@ -67,16 +96,15 @@ def _execute_search(
                 )
                 time.sleep(wait)
 
-    if strategy_label != "KEYWORD" and "hybrid" in send_body:
+    if strategy_label != "KEYWORD" and "hybrid" in opt_params:
         logger.warning(
             "meili_hybrid_fallback",
             extra={"original_strategy": strategy_label, "error": str(last_error)},
         )
-        fallback_body = {k: v for k, v in send_body.items() if k != "hybrid"}
+        fallback_params = {k: v for k, v in opt_params.items() if k != "hybrid"}
         try:
-            resp = requests.post(url, headers=_headers(), json=fallback_body, timeout=10)
-            resp.raise_for_status()
-            return _norm(resp.json(), "KEYWORD_FALLBACK", True)
+            result = index.search(query, fallback_params)
+            return _norm(result, "KEYWORD_FALLBACK", True)
         except Exception as fallback_exc:
             logger.error("meili_hard_failure", extra={"error": str(fallback_exc)})
             raise RuntimeError(
@@ -87,6 +115,10 @@ def _execute_search(
         f"Meilisearch search failed after 3 retries: {last_error}"
     ) from last_error
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Default retrieve fields
+# ══════════════════════════════════════════════════════════════════════════════
 
 def _retrieve_fields(fields: list[str] | None) -> list[str]:
     if fields:
@@ -99,6 +131,10 @@ def _retrieve_fields(fields: list[str] | None) -> list[str]:
     ]
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  Public search functions
+# ══════════════════════════════════════════════════════════════════════════════
+
 def keyword_search(
     query: str,
     limit: int = 20,
@@ -106,16 +142,14 @@ def keyword_search(
     retrieve_fields: list[str] | None = None,
     index_name: str | None = None,
 ) -> dict[str, Any]:
-    body: dict[str, Any] = {
-        "q": query,
+    opt_params: dict[str, Any] = {
         "limit": limit,
         "showRankingScore": True,
         "attributesToRetrieve": _retrieve_fields(retrieve_fields),
-        "_strategy": "KEYWORD",
     }
     if filters:
-        body["filter"] = filters
-    return _execute_search(body, index_name)
+        opt_params["filter"] = filters
+    return _execute_search(query, opt_params, "KEYWORD", index_name)
 
 
 def hybrid_search(
@@ -126,8 +160,7 @@ def hybrid_search(
     retrieve_fields: list[str] | None = None,
     index_name: str | None = None,
 ) -> dict[str, Any]:
-    body: dict[str, Any] = {
-        "q": query,
+    opt_params: dict[str, Any] = {
         "limit": limit,
         "showRankingScore": True,
         "attributesToRetrieve": _retrieve_fields(retrieve_fields),
@@ -135,11 +168,10 @@ def hybrid_search(
             "embedder": settings.meili_embedder_name,
             "semanticRatio": semantic_ratio,
         },
-        "_strategy": "HYBRID",
     }
     if filters:
-        body["filter"] = filters
-    return _execute_search(body, index_name)
+        opt_params["filter"] = filters
+    return _execute_search(query, opt_params, "HYBRID", index_name)
 
 
 def semantic_search(
@@ -184,6 +216,7 @@ def search(
     retrieve_fields: list[str] | None = None,
     index_name: str | None = None,
 ) -> dict[str, Any]:
+    """Route to the appropriate search function based on strategy."""
     alpha = (hybrid_weights or {}).get("semanticRatio", 0.6)
     if strategy == "KEYWORD":
         return keyword_search(
@@ -208,14 +241,14 @@ def search(
     )
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  Index stats + task helpers
+# ══════════════════════════════════════════════════════════════════════════════
+
 def get_index_stats(index_name: str | None = None) -> dict[str, Any]:
     idx = index_name or settings.meili_index_name
     try:
-        resp = requests.get(
-            _url(f"/indexes/{idx}/stats"), headers=_headers(), timeout=5,
-        )
-        resp.raise_for_status()
-        data = resp.json()
+        data = _get_client().index(idx).get_stats()
         return {
             "number_of_documents": data.get("numberOfDocuments", 0),
             "is_indexing": data.get("isIndexing", False),
@@ -226,9 +259,8 @@ def get_index_stats(index_name: str | None = None) -> dict[str, Any]:
 
 
 def check_task(task_uid: int) -> dict[str, Any]:
-    resp = requests.get(_url(f"/tasks/{task_uid}"), headers=_headers(), timeout=5)
-    resp.raise_for_status()
-    return resp.json()
+    """Get the status of a Meilisearch task by UID."""
+    return _get_client().get_task(task_uid)
 
 
 def wait_for_task(
@@ -236,6 +268,7 @@ def wait_for_task(
     interval: int = 5,
     timeout: int = 1800,
 ) -> dict[str, Any]:
+    """Poll a task until it succeeds or fails (with progress output)."""
     elapsed = 0
     while elapsed < timeout:
         task = check_task(task_uid)
@@ -252,21 +285,20 @@ def wait_for_task(
 
 
 async def poll_last_indexing_task(index_name: str | None = None) -> dict[str, Any]:
+    """Poll the most recent document-indexing task (async wrapper)."""
     idx = index_name or settings.meili_index_name
     params = {
-        "indexUids": idx,
-        "statuses": "succeeded,processing",
-        "types": "documentAdditionOrUpdate",
-        "limit": "1",
+        "indexUids": [idx],
+        "statuses": ["succeeded", "processing"],
+        "types": ["documentAdditionOrUpdate"],
+        "limit": 1,
     }
     for _ in range(2):
         try:
             loop = asyncio.get_event_loop()
             data = await loop.run_in_executor(
                 None,
-                lambda: requests.get(
-                    _url("/tasks"), headers=_headers(), params=params, timeout=3,
-                ).json(),
+                lambda: _get_client().get_tasks(params),
             )
             results = data.get("results", [])
             if not results:

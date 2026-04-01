@@ -227,13 +227,16 @@ def searcher_node(state: dict) -> dict:
         state: The pipeline state dict.
 
     Returns:
-        Updated state dict with search_results, freshness_metadata, etc.
+        Dict of only the keys this node changed.
     """
     start = time.perf_counter()
     query_hash = state.get("query_hash", "")
     strategy = state.get("retrieval_strategy", "HYBRID")
     hybrid_weights = state.get("hybrid_weights", {"semanticRatio": 0.6})
     filter_relaxation = False
+
+    updates: dict = {}
+    new_errors: list[dict] = []
 
     # ── Step 1: Build the search query ────────────────────────────────────────
     search_query = _build_search_query(state)
@@ -264,8 +267,6 @@ def searcher_node(state: dict) -> dict:
         hits = raw_response.get("hits", [])
 
         # ── Step 4: Filter relaxation ─────────────────────────────────────────
-        # If we got zero results AND we had filters applied, retry without filters.
-        # This prevents returning empty results when filters are too restrictive.
         if len(hits) == 0 and filter_string:
             logger.info(
                 "searcher_filter_relaxation",
@@ -286,8 +287,7 @@ def searcher_node(state: dict) -> dict:
             hits = raw_response.get("hits", [])
             filter_relaxation = True
 
-            errors = state.get("errors", [])
-            errors.append(
+            new_errors.append(
                 ExtractionError(
                     node="searcher",
                     severity=ErrorSeverity.WARNING,
@@ -299,7 +299,6 @@ def searcher_node(state: dict) -> dict:
                     ),
                 ).model_dump()
             )
-            state["errors"] = errors
 
         # ── Step 5: Map hits to SearchResult objects ──────────────────────────
         search_results = _hits_to_search_results(hits)
@@ -308,9 +307,9 @@ def searcher_node(state: dict) -> dict:
         freshness = _build_freshness_report(search_results)
 
         # ── Step 7: Update state ──────────────────────────────────────────────
-        state["search_results"] = [r.model_dump() for r in search_results]
-        state["freshness_metadata"] = freshness.model_dump()
-        state["filter_relaxation_applied"] = filter_relaxation
+        updates["search_results"] = [r.model_dump() for r in search_results]
+        updates["freshness_metadata"] = freshness.model_dump()
+        updates["filter_relaxation_applied"] = filter_relaxation
 
         result_count = len(search_results)
         strategy_used = raw_response.get("strategy_used", strategy)
@@ -328,15 +327,12 @@ def searcher_node(state: dict) -> dict:
         )
 
     except RuntimeError as exc:
-        # Meilisearch is completely unreachable (after 3 retries + fallback)
-        # The meilisearch_client raises RuntimeError on hard failure.
         logger.error(
             "searcher_meili_failure",
             extra={"query_hash": query_hash, "error": str(exc)},
         )
 
-        errors = state.get("errors", [])
-        errors.append(
+        new_errors.append(
             ExtractionError(
                 node="searcher",
                 severity=ErrorSeverity.ERROR,
@@ -348,22 +344,19 @@ def searcher_node(state: dict) -> dict:
                 ),
             ).model_dump()
         )
-        state["errors"] = errors
-        state["search_results"] = []
-        state["freshness_metadata"] = FreshnessReport().model_dump()
+        updates["search_results"] = []
+        updates["freshness_metadata"] = FreshnessReport().model_dump()
 
         result_count = 0
         strategy_used = strategy
 
     except Exception as exc:
-        # Unexpected error — catch-all so the pipeline doesn't crash
         logger.error(
             "searcher_unexpected_error",
             extra={"query_hash": query_hash, "error": str(exc)},
         )
 
-        errors = state.get("errors", [])
-        errors.append(
+        new_errors.append(
             ExtractionError(
                 node="searcher",
                 severity=ErrorSeverity.ERROR,
@@ -372,9 +365,8 @@ def searcher_node(state: dict) -> dict:
                 fallback_description="Unexpected error in searcher node.",
             ).model_dump()
         )
-        state["errors"] = errors
-        state["search_results"] = []
-        state["freshness_metadata"] = FreshnessReport().model_dump()
+        updates["search_results"] = []
+        updates["freshness_metadata"] = FreshnessReport().model_dump()
 
         result_count = 0
         strategy_used = strategy
@@ -392,4 +384,7 @@ def searcher_node(state: dict) -> dict:
         extra={"filter_relaxation": filter_relaxation},
     )
 
-    return state
+    if new_errors:
+        updates["errors"] = new_errors
+
+    return updates
