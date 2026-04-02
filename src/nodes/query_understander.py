@@ -148,45 +148,45 @@ def query_understander_node(state: dict) -> dict:
         state: The pipeline state dict (contains "query" at minimum).
 
     Returns:
-        Updated state dict with parsed_intent, query_hash, token_usage, etc.
+        Dict of only the keys this node changed. List fields (errors,
+        token_usage, search_history) contain only NEW items — the
+        operator.add reducer in SearchStateDict merges them.
     """
     start = time.perf_counter()
     query = state.get("query", "")
 
+    # Accumulate updates — only changed keys are returned
+    updates: dict = {}
+    new_errors: list[dict] = []
+    new_token_usage: list[dict] = []
+    new_search_history: list[dict] = []
+
     # ── Step 1: Generate query hash for traceability ─────────────────────────
-    # PRD Section 5: "every search traceable by session_id + query_hash"
     query_hash = hashlib.md5(query.encode()).hexdigest()[:12]
-    state["query_hash"] = query_hash
+    updates["query_hash"] = query_hash
 
     # ── Step 2: Scan for prompt injection ────────────────────────────────────
-    # PRD Section 4.7: "detect and strip instruction-like patterns from user
-    # queries before LLM processing"
     is_safe, risk_score = _scan_for_injection(query)
 
     # ── Step 3: If injection detected → hard exit to reporter ────────────────
     if not is_safe:
-        # Log the detection (PRD Section 4.7: "log any query that matches
-        # injection pattern signatures")
         log_injection_detection(
             logger, "user_query", None, "prompt_injection", risk_score,
         )
 
-        # Write structured error to state (PRD Section 4.1: "errors" field)
-        errors = state.get("errors", [])
-        error = ExtractionError(
-            node="query_understander",
-            severity=ErrorSeverity.ERROR,
-            message="INJECTION_DETECTED",
-            fallback_applied=True,
-            fallback_description=(
-                "Query blocked — prompt injection detected with risk score "
-                f"{risk_score:.4f}. No search results returned."
-            ),
+        new_errors.append(
+            ExtractionError(
+                node="query_understander",
+                severity=ErrorSeverity.ERROR,
+                message="INJECTION_DETECTED",
+                fallback_applied=True,
+                fallback_description=(
+                    "Query blocked — prompt injection detected with risk score "
+                    f"{risk_score:.4f}. No search results returned."
+                ),
+            ).model_dump()
         )
-        errors.append(error.model_dump())
-        state["errors"] = errors
 
-        # Log and annotate the node exit
         duration_ms = (time.perf_counter() - start) * 1000
         log_node_exit(
             logger, "query_understander", query_hash,
@@ -197,21 +197,21 @@ def query_understander_node(state: dict) -> dict:
             extra={"injection_risk": round(risk_score, 4)},
         )
 
-        return state
+        updates["errors"] = new_errors
+        return updates
 
     # ── Step 4: Parse intent with GPT-4o-mini ────────────────────────────────
+    cost_usd = 0.0
+
     try:
-        # Check token budget BEFORE making the LLM call (PRD Section 4.5)
         check_budget(
             state.get("cumulative_token_cost", 0.0),
             "query_understander",
             query_hash,
         )
 
-        # Call GPT to parse the query
         parsed, prompt_tokens, completion_tokens = _parse_intent_with_llm(query)
 
-        # Build IntentModel from GPT's response (validates types via Pydantic)
         intent = IntentModel(
             type=IntentType(parsed.get("type", "INFORMATIONAL")),
             entities=parsed.get("entities", []),
@@ -219,54 +219,42 @@ def query_understander_node(state: dict) -> dict:
             ambiguity_score=float(parsed.get("ambiguity_score", 0.5)),
             language=parsed.get("language", "en"),
         )
-        state["parsed_intent"] = intent.model_dump()
+        updates["parsed_intent"] = intent.model_dump()
 
         # ── Step 5: Record token usage ───────────────────────────────────────
-        # Cost formula from Working Flow doc:
-        # cost = (prompt_tokens × $0.000000150) + (completion_tokens × $0.000000600)
         cost_usd = (prompt_tokens * 0.000000150) + (completion_tokens * 0.000000600)
 
-        token_record = TokenUsage(
-            node="query_understander",
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            cost_usd=round(cost_usd, 8),
+        new_token_usage.append(
+            TokenUsage(
+                node="query_understander",
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                cost_usd=round(cost_usd, 8),
+            ).model_dump()
         )
 
-        token_list = state.get("token_usage", [])
-        token_list.append(token_record.model_dump())
-        state["token_usage"] = token_list
-
-        # Update the running total cost (PRD Section 4.5: cumulative tracking)
-        state["cumulative_token_cost"] = round(
+        updates["cumulative_token_cost"] = round(
             state.get("cumulative_token_cost", 0.0) + cost_usd, 8
         )
 
         # ── Step 6: Add sanitized query to search_history ────────────────────
-        # PRD Section 4.5: "search_history in state must prevent semantic
-        # near-duplicates"
-        # Working Flow: "search_history[0] — sanitised query variant (never raw query)"
         sanitized_variant = " ".join(intent.entities) if intent.entities else query
 
-        history = state.get("search_history", [])
-        history.append(
+        new_search_history.append(
             SearchAttempt(
                 strategy=RetrievalStrategy.HYBRID,
                 query_variant=sanitized_variant,
             ).model_dump()
         )
-        state["search_history"] = history
 
     except json.JSONDecodeError as exc:
-        # GPT returned invalid JSON — use safe defaults
         logger.warning(
             "intent_parse_bad_json",
             extra={"error": str(exc), "fallback": "default IntentModel"},
         )
-        state["parsed_intent"] = IntentModel().model_dump()
+        updates["parsed_intent"] = IntentModel().model_dump()
 
-        errors = state.get("errors", [])
-        errors.append(
+        new_errors.append(
             ExtractionError(
                 node="query_understander",
                 severity=ErrorSeverity.WARNING,
@@ -279,24 +267,18 @@ def query_understander_node(state: dict) -> dict:
                 ),
             ).model_dump()
         )
-        state["errors"] = errors
 
     except ValueError:
-        # Budget exceeded — check_budget() raised ValueError
-        errors = state.get("errors", [])
-        errors.append(make_budget_exceeded_error("query_understander").model_dump())
-        state["errors"] = errors
+        new_errors.append(make_budget_exceeded_error("query_understander").model_dump())
 
     except Exception as exc:
-        # Any other GPT failure — use safe defaults, do not crash
         logger.warning(
             "intent_parsing_failed",
             extra={"error": str(exc), "fallback": "default IntentModel"},
         )
-        state["parsed_intent"] = IntentModel().model_dump()
+        updates["parsed_intent"] = IntentModel().model_dump()
 
-        errors = state.get("errors", [])
-        errors.append(
+        new_errors.append(
             ExtractionError(
                 node="query_understander",
                 severity=ErrorSeverity.WARNING,
@@ -308,7 +290,6 @@ def query_understander_node(state: dict) -> dict:
                 ),
             ).model_dump()
         )
-        state["errors"] = errors
 
     # ── Step 7: Log and annotate node exit ────────────────────────────────────
     duration_ms = (time.perf_counter() - start) * 1000
@@ -317,8 +298,16 @@ def query_understander_node(state: dict) -> dict:
     log_node_exit(
         logger, "query_understander", query_hash,
         0, strategy, duration_ms,
-        state.get("cumulative_token_cost", 0.0),
+        state.get("cumulative_token_cost", 0.0) + cost_usd,
     )
     annotate_node_span("query_understander", 0, strategy, duration_ms)
 
-    return state
+    # Only include list fields if they have new items (avoid no-op merges)
+    if new_errors:
+        updates["errors"] = new_errors
+    if new_token_usage:
+        updates["token_usage"] = new_token_usage
+    if new_search_history:
+        updates["search_history"] = new_search_history
+
+    return updates

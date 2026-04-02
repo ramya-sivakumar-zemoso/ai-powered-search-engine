@@ -13,7 +13,8 @@ dependencies = [
     "langchain-core>=1.0.2",
     "langchain-openai==1.0.3",
 
-    # Search backend — Meilisearch REST (meilisearch_client, setup_index)
+    # Search backend — official Meilisearch Python SDK
+    "meilisearch>=0.31.0",
     "requests==2.32.3",
 
     # Embeddings + reranker

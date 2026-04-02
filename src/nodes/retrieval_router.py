@@ -214,9 +214,16 @@ def retrieval_router_node(state: dict) -> dict:
       Step 6: Write strategy + weights to state
       Step 7: Record token usage
       Step 8: Log and annotate
+
+    Returns:
+        Dict of only the keys this node changed.
     """
     start = time.perf_counter()
     query_hash = state.get("query_hash", "")
+
+    updates: dict = {}
+    new_errors: list[dict] = []
+    new_token_usage: list[dict] = []
 
     # ── Step 1: Read inputs from state ───────────────────────────────────────
     parsed_intent = state.get("parsed_intent", {})
@@ -234,15 +241,14 @@ def retrieval_router_node(state: dict) -> dict:
     rule_applied = 0
     reasoning = ""
     used_llm = False
+    cost_usd = 0.0
 
     try:
-        # Check budget before LLM call
         check_budget(
             state.get("cumulative_token_cost", 0.0),
             "retrieval_router", query_hash,
         )
 
-        # Try LLM routing
         parsed, prompt_tokens, completion_tokens = _route_with_llm(
             parsed_intent, retry_prescription, search_history,
         )
@@ -253,11 +259,9 @@ def retrieval_router_node(state: dict) -> dict:
         reasoning = parsed.get("reasoning", "")
         used_llm = True
 
-        # Record token usage
         cost_usd = (prompt_tokens * 0.000000150) + (completion_tokens * 0.000000600)
 
-        token_list = state.get("token_usage", [])
-        token_list.append(
+        new_token_usage.append(
             TokenUsage(
                 node="retrieval_router",
                 prompt_tokens=prompt_tokens,
@@ -265,16 +269,12 @@ def retrieval_router_node(state: dict) -> dict:
                 cost_usd=round(cost_usd, 8),
             ).model_dump()
         )
-        state["token_usage"] = token_list
-        state["cumulative_token_cost"] = round(
+        updates["cumulative_token_cost"] = round(
             state.get("cumulative_token_cost", 0.0) + cost_usd, 8
         )
 
     except ValueError:
-        # Budget exceeded — fall back to heuristic (free, no LLM call)
-        errors = state.get("errors", [])
-        errors.append(make_budget_exceeded_error("retrieval_router").model_dump())
-        state["errors"] = errors
+        new_errors.append(make_budget_exceeded_error("retrieval_router").model_dump())
 
         strategy, semantic_ratio, rule_applied, reasoning = _heuristic_route(
             intent_type, ambiguity_score, entities,
@@ -282,7 +282,6 @@ def retrieval_router_node(state: dict) -> dict:
         reasoning += " (heuristic fallback — budget exceeded)"
 
     except Exception as exc:
-        # LLM failed — fall back to heuristic
         logger.warning(
             "routing_llm_failed",
             extra={"error": str(exc), "fallback": "heuristic rules"},
@@ -293,8 +292,7 @@ def retrieval_router_node(state: dict) -> dict:
         )
         reasoning += " (heuristic fallback — LLM unavailable)"
 
-        errors = state.get("errors", [])
-        errors.append(
+        new_errors.append(
             ExtractionError(
                 node="retrieval_router",
                 severity=ErrorSeverity.WARNING,
@@ -303,7 +301,6 @@ def retrieval_router_node(state: dict) -> dict:
                 fallback_description="Used heuristic rule table instead of LLM.",
             ).model_dump()
         )
-        state["errors"] = errors
 
     # ── Step 5: Apply retry override if applicable ───────────────────────────
     if is_retry:
@@ -313,14 +310,13 @@ def retrieval_router_node(state: dict) -> dict:
         if override_note:
             reasoning += f" | {override_note}"
 
-    # ── Step 6: Write strategy + weights to state ────────────────────────────
-    state["retrieval_strategy"] = strategy
-    state["hybrid_weights"] = {"semanticRatio": round(semantic_ratio, 2)}
-    state["router_reasoning"] = reasoning
+    # ── Step 6: Write strategy + weights ─────────────────────────────────────
+    updates["retrieval_strategy"] = strategy
+    updates["hybrid_weights"] = {"semanticRatio": round(semantic_ratio, 2)}
+    updates["router_reasoning"] = reasoning
 
-    # Clear retry_prescription after it's been consumed
     if is_retry:
-        state["retry_prescription"] = None
+        updates["retry_prescription"] = None
 
     # ── Step 7: Log and annotate ─────────────────────────────────────────────
     duration_ms = (time.perf_counter() - start) * 1000
@@ -328,7 +324,7 @@ def retrieval_router_node(state: dict) -> dict:
     log_node_exit(
         logger, "retrieval_router", query_hash,
         0, strategy, duration_ms,
-        state.get("cumulative_token_cost", 0.0),
+        state.get("cumulative_token_cost", 0.0) + cost_usd,
         extra={
             "rule_applied": rule_applied,
             "semantic_ratio": semantic_ratio,
@@ -344,4 +340,9 @@ def retrieval_router_node(state: dict) -> dict:
         },
     )
 
-    return state
+    if new_errors:
+        updates["errors"] = new_errors
+    if new_token_usage:
+        updates["token_usage"] = new_token_usage
+
+    return updates

@@ -27,6 +27,7 @@ from typing import Any
 import langwatch
 from langgraph.graph import StateGraph, START, END
 
+from src.models.state import SearchStateDict
 from src.nodes.query_understander import query_understander_node
 from src.nodes.retrieval_router import retrieval_router_node
 from src.nodes.searcher import searcher_node
@@ -133,8 +134,8 @@ def build_graph() -> StateGraph:
     Returns:
         A compiled LangGraph that can be invoked with a state dict.
     """
-    # Create the graph using dict state (LangGraph works with dicts internally)
-    graph = StateGraph(dict)
+    # Create the graph with typed state — list fields use operator.add reducers
+    graph = StateGraph(SearchStateDict)
 
     # ── Add all 6 nodes ──────────────────────────────────────────────────────
     graph.add_node("query_understander", query_understander_node)

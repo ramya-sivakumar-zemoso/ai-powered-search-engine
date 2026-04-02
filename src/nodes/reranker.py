@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import time
 from pathlib import Path
 
@@ -135,29 +136,62 @@ def _score_with_cross_encoder(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  HELPER: Sanitize document fields before feeding to LLM (PRD 4.7)
+# ══════════════════════════════════════════════════════════════════════════════
+
+_INJECTION_PATTERNS = re.compile(
+    r"(?i)^(SYSTEM\s*:|ASSISTANT\s*:|USER\s*:|"
+    r"ignore\s+previous|forget\s+all|disregard\s+above|"
+    r"override\s+instructions|you\s+must\s+always\s+rank|"
+    r"always\s+rank\s+this|do\s+not\s+follow)"
+)
+
+
+def _sanitize_field(text: str) -> str:
+    """Strip lines that look like prompt injection from a document field.
+
+    Removes lines matching known injection prefixes while keeping
+    legitimate content intact.
+    """
+    cleaned = []
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if stripped and _INJECTION_PATTERNS.match(stripped):
+            continue
+        cleaned.append(line)
+    return "\n".join(cleaned).strip()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  HELPER: Build context string for the LLM explanation prompt
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _build_results_context(results: list[dict]) -> str:
-    """Build a text block describing each result for the LLM prompt."""
+    """Build a text block with explicit content boundaries for each result.
+
+    Each field is wrapped in <doc_*> tags so the LLM can distinguish
+    document data from structural formatting (PRD Section 4.7 —
+    content boundary enforcement).
+    """
     lines = []
     for i, r in enumerate(results, 1):
         result_id = r.get("id", "?")
-        title = r.get("title", "Untitled")
-        category = r.get("source_fields", {}).get("category", "")
-        genres = r.get("source_fields", {}).get("genres_all", "")
-        description = r.get("source_fields", {}).get("description", "")
+        title = _sanitize_field(r.get("title", "Untitled"))
+        category = _sanitize_field(r.get("source_fields", {}).get("category", ""))
+        genres = _sanitize_field(r.get("source_fields", {}).get("genres_all", ""))
+        description = _sanitize_field(r.get("source_fields", {}).get("description", ""))
 
         if len(description) > 250:
             description = description[:250] + "..."
 
-        line = f'[Result {i}] id="{result_id}", title="{title}"'
+        line = f'[Result {i}] id="{result_id}"'
+        line += f', <doc_title>{title}</doc_title>'
         if category:
-            line += f', category="{category}"'
+            line += f', <doc_category>{category}</doc_category>'
         if genres:
-            line += f', genres="{genres}"'
+            line += f', <doc_genres>{genres}</doc_genres>'
         if description:
-            line += f', description="{description}"'
+            line += f', <doc_description>{description}</doc_description>'
         lines.append(line)
 
     return "\n".join(lines)
@@ -288,7 +322,7 @@ def reranker_node(state: dict) -> dict:
         state: The pipeline state dict.
 
     Returns:
-        Updated state dict with reranked_results.
+        Dict of only the keys this node changed.
     """
     start = time.perf_counter()
     query = state.get("query", "")
@@ -296,16 +330,20 @@ def reranker_node(state: dict) -> dict:
     results = state.get("search_results", [])
     strategy = state.get("retrieval_strategy", "HYBRID")
 
+    updates: dict = {}
+    new_errors: list[dict] = []
+    new_token_usage: list[dict] = []
+
     top_n = settings.reranker_top_n
     candidates = results[:top_n]
 
     # ── Early exit: nothing to rerank ─────────────────────────────────────
     if not candidates:
-        state["reranked_results"] = []
+        updates["reranked_results"] = []
         duration_ms = (time.perf_counter() - start) * 1000
         log_node_exit(logger, "reranker", query_hash, 0, strategy, duration_ms, 0.0)
         annotate_node_span("reranker", 0, strategy, duration_ms)
-        return state
+        return updates
 
     # ── Step 1: Cross-encoder scoring ─────────────────────────────────────
     try:
@@ -315,11 +353,9 @@ def reranker_node(state: dict) -> dict:
             "cross_encoder_failed",
             extra={"error": str(exc)[:200], "fallback": "original_ranking"},
         )
-        # Fallback: keep original Meilisearch order with descending scores
         scored = [(i, 1.0 - (i * 0.01)) for i in range(len(candidates))]
 
-        errors = state.get("errors", [])
-        errors.append(
+        new_errors.append(
             ExtractionError(
                 node="reranker",
                 severity=ErrorSeverity.WARNING,
@@ -331,7 +367,6 @@ def reranker_node(state: dict) -> dict:
                 ),
             ).model_dump()
         )
-        state["errors"] = errors
 
     # ── Step 2: Build re-ranked list in cross-encoder order ───────────────
     reranked_candidates = []
@@ -348,6 +383,7 @@ def reranker_node(state: dict) -> dict:
     # ── Step 3: Generate LLM explanations (if budget allows) ─────────────
     explanations_map: dict[str, str] = {}
     explanation_generated = False
+    cost_usd = 0.0
 
     try:
         check_budget(
@@ -367,8 +403,7 @@ def reranker_node(state: dict) -> dict:
 
         cost_usd = (prompt_tokens * 0.000000150) + (completion_tokens * 0.000000600)
 
-        token_list = state.get("token_usage", [])
-        token_list.append(
+        new_token_usage.append(
             TokenUsage(
                 node="reranker",
                 prompt_tokens=prompt_tokens,
@@ -376,8 +411,7 @@ def reranker_node(state: dict) -> dict:
                 cost_usd=round(cost_usd, 8),
             ).model_dump()
         )
-        state["token_usage"] = token_list
-        state["cumulative_token_cost"] = round(
+        updates["cumulative_token_cost"] = round(
             state.get("cumulative_token_cost", 0.0) + cost_usd, 8
         )
 
@@ -388,17 +422,14 @@ def reranker_node(state: dict) -> dict:
             "reranker_budget_exceeded",
             extra={"fallback": "cross_encoder_only"},
         )
-        errors = state.get("errors", [])
-        errors.append(make_budget_exceeded_error("reranker").model_dump())
-        state["errors"] = errors
+        new_errors.append(make_budget_exceeded_error("reranker").model_dump())
 
     except json.JSONDecodeError as exc:
         logger.warning(
             "explanation_parse_failed",
             extra={"error": str(exc)[:200], "fallback": "no_explanations"},
         )
-        errors = state.get("errors", [])
-        errors.append(
+        new_errors.append(
             ExtractionError(
                 node="reranker",
                 severity=ErrorSeverity.WARNING,
@@ -410,15 +441,13 @@ def reranker_node(state: dict) -> dict:
                 ),
             ).model_dump()
         )
-        state["errors"] = errors
 
     except Exception as exc:
         logger.warning(
             "explanation_generation_failed",
             extra={"error": str(exc)[:200], "fallback": "no_explanations"},
         )
-        errors = state.get("errors", [])
-        errors.append(
+        new_errors.append(
             ExtractionError(
                 node="reranker",
                 severity=ErrorSeverity.WARNING,
@@ -430,7 +459,6 @@ def reranker_node(state: dict) -> dict:
                 ),
             ).model_dump()
         )
-        state["errors"] = errors
 
     # ── Step 4: Citation audit + build RankedResult objects ───────────────
     reranked_results = []
@@ -459,13 +487,10 @@ def reranker_node(state: dict) -> dict:
         )
         reranked_results.append(ranked.model_dump())
 
-    state["reranked_results"] = reranked_results
+    updates["reranked_results"] = reranked_results
 
     # ── Step 5: Compute aggregate rerank_confidence signal (PRD 5th signal)
-    # The evaluator couldn't score this (runs before reranker). Now that we
-    # have cross-encoder confidence, we append it to quality_scores so the
-    # reporter and summary output show all 5 signals.
-    quality_scores = state.get("quality_scores", {})
+    quality_scores = dict(state.get("quality_scores", {}))
     if reranked_results:
         confidences = [r["confidence"] for r in reranked_results]
         mean_conf = sum(confidences) / len(confidences)
@@ -475,11 +500,11 @@ def reranker_node(state: dict) -> dict:
     else:
         quality_scores["rerank_confidence"] = 0.0
         quality_scores["rerank_low_confidence_ratio"] = 1.0
-    state["quality_scores"] = quality_scores
+    updates["quality_scores"] = quality_scores
 
     # ── Step 6: Log and annotate node exit ────────────────────────────────
     duration_ms = (time.perf_counter() - start) * 1000
-    token_cost = state.get("cumulative_token_cost", 0.0)
+    token_cost = state.get("cumulative_token_cost", 0.0) + cost_usd
 
     verified_count = sum(
         1 for r in reranked_results
@@ -506,4 +531,9 @@ def reranker_node(state: dict) -> dict:
         },
     )
 
-    return state
+    if new_errors:
+        updates["errors"] = new_errors
+    if new_token_usage:
+        updates["token_usage"] = new_token_usage
+
+    return updates

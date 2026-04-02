@@ -110,7 +110,7 @@ col_input, col_hits, col_btn = st.columns([5, 1, 1])
 
 with col_input:
     query = st.text_input(
-        "Query", placeholder="e.g. wireless earbuds under $50 with noise cancellation",
+        "Query", placeholder="e.g. Family movies, Pirates of the Caribbean or Weekend thriller movie with friends",
         label_visibility="collapsed",
     )
 with col_hits:

@@ -150,7 +150,7 @@ def reporter_node(state: dict) -> dict:
         state: The pipeline state dict.
 
     Returns:
-        Updated state dict with final_response added.
+        Dict of only the keys this node changed.
     """
     start = time.perf_counter()
     query_hash = state.get("query_hash", "")
@@ -187,8 +187,6 @@ def reporter_node(state: dict) -> dict:
         "warnings": _build_warnings(state),
     }
 
-    state["final_response"] = final_response
-
     # ── Step 3: Log and annotate node exit ────────────────────────────────
     duration_ms = (time.perf_counter() - start) * 1000
     token_cost = state.get("cumulative_token_cost", 0.0)
@@ -210,4 +208,4 @@ def reporter_node(state: dict) -> dict:
         },
     )
 
-    return state
+    return {"final_response": final_response}
