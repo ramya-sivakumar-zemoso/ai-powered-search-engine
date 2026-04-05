@@ -69,6 +69,7 @@ class SearchResult(BaseModel):
 class RankedResult(BaseModel):
     """A re-ranked result with confidence and explanation (PRD Section 4.2)."""
     id: str
+    title: str = ""
     original_rank: int = 0
     new_rank: int = 0
     relevance_score: float = 0.0
@@ -81,7 +82,7 @@ class FreshnessReport(BaseModel):
     """Index freshness metadata surfaced in every response (PRD Section 4.3)."""
     index_last_updated: datetime | None = None
     staleness_flag: bool = False
-    stale_result_ids: list[str] = Field(default_factory=list)
+    stale_result_ids: list[dict] = Field(default_factory=list)
     max_staleness_seconds: float = 0.0
 
 class RetryPrescription(BaseModel):

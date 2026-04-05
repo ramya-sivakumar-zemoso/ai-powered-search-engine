@@ -67,7 +67,11 @@ MOVIES_SCHEMA = DatasetSchema(
     searchable_fields=["title", "description", "genres_all", "category"],
     filterable_fields=["category", "genres_all", "in_stock"],
     sortable_fields=["indexed_at", "rating"],
-    embedder_template="{{doc.title}} {{doc.description}} {{doc.genres_all}}",
+    embedder_template=(
+        "A {{doc.category}} film called {{doc.title}}. "
+        "{{doc.description}} Genre: {{doc.genres_all}}."
+    ),
+    description_fallback_template="A {category} film.",
 )
 
 

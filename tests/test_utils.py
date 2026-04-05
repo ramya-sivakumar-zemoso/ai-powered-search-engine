@@ -65,3 +65,32 @@ def test_to_jsonable_pydantic_model():
     result = to_jsonable(model)
     assert result["node"] == "test"
     assert result["prompt_tokens"] == 100
+
+
+# ── LLM Utilities ──────────────────────────────────────────────────────────
+
+from src.utils.llm import strip_markdown_fences, extract_token_usage
+
+
+@pytest.mark.parametrize("inp, expected", [
+    ('{"key": "val"}', '{"key": "val"}'),
+    ('```json\n{"key": "val"}\n```', '{"key": "val"}'),
+    ('```\n{"key": "val"}\n```', '{"key": "val"}'),
+])
+def test_strip_markdown_fences(inp, expected):
+    assert strip_markdown_fences(inp) == expected
+
+
+def test_extract_token_usage_new_format():
+    class Resp:
+        usage_metadata = {"input_tokens": 100, "output_tokens": 50}
+    p, c = extract_token_usage(Resp())
+    assert p == 100 and c == 50
+
+
+def test_extract_token_usage_legacy_format():
+    class Resp:
+        usage_metadata = None
+        response_metadata = {"token_usage": {"prompt_tokens": 80, "completion_tokens": 40}}
+    p, c = extract_token_usage(Resp())
+    assert p == 80 and c == 40

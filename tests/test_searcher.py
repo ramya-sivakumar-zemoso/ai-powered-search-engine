@@ -65,7 +65,7 @@ def test_freshness_stale():
     results = [SearchResult(id="1", freshness_timestamp=old)]
     report = _build_freshness_report(results)
     assert report.staleness_flag
-    assert "1" in report.stale_result_ids
+    assert {"id": "1", "title": ""} in report.stale_result_ids
 
 
 # ── Searcher Node (mocked Meilisearch) ─────────────────────────────────────

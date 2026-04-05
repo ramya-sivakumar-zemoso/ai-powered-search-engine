@@ -71,7 +71,10 @@ def get_settings() -> Settings:
         max_search_iterations=int(os.getenv("MAX_SEARCH_ITERATIONS", "3")),
         token_budget_usd=float(os.getenv("TOKEN_BUDGET_USD", "0.02")),
         reranker_top_n=int(os.getenv("RERANKER_TOP_N", "10")),
-        reranker_model=os.getenv("RERANKER_MODEL", "cross-encoder/ms-marco-multilingual-L12-v2"),
+        reranker_model=os.getenv(
+            "RERANKER_MODEL",
+            "BAAI/bge-reranker-v2-m3",
+        ),
         confidence_threshold_degraded=float(os.getenv("CONFIDENCE_THRESHOLD_DEGRADED", "0.30")),
         near_duplicate_threshold=float(os.getenv("NEAR_DUPLICATE_THRESHOLD", "0.92")),
         # ── Injection detection ──────────────────────────────
