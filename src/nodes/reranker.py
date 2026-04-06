@@ -462,86 +462,105 @@ def reranker_node(state: dict) -> dict:
             "confidence": round(ce_score, 4),
         })
 
-    # ── Step 3: Generate LLM explanations (if budget allows) ─────────────
+    # ── Step 3: Generate LLM explanations (if budget and fast_mode allow) ──
     explanations_map: dict[str, str] = {}
     explanation_generated = False
     cost_usd = 0.0
 
-    try:
-        check_budget(
-            state.get("cumulative_token_cost", 0.0),
-            "reranker",
-            query_hash,
-        )
-
-        ordered_for_llm = [rc["result"] for rc in reranked_candidates]
-        raw_explanations, prompt_tokens, completion_tokens = _generate_explanations(
-            query, ordered_for_llm, schema,
-        )
-
-        for entry in raw_explanations:
-            if isinstance(entry, dict):
-                explanations_map[str(entry.get("id", ""))] = entry.get("explanation", "")
-
-        cost_usd = (prompt_tokens * 0.000000150) + (completion_tokens * 0.000000600)
-
-        new_token_usage.append(
-            TokenUsage(
-                node="reranker",
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                cost_usd=round(cost_usd, 8),
-            ).model_dump()
-        )
-        updates["cumulative_token_cost"] = round(
-            state.get("cumulative_token_cost", 0.0) + cost_usd, 8
-        )
-
-        explanation_generated = True
-
-    except ValueError:
-        logger.warning(
-            "reranker_budget_exceeded",
-            extra={"fallback": "cross_encoder_only"},
-        )
+    # fast_mode=True skips LLM explanation generation entirely to reduce
+    # end-to-end latency by ~400-800 ms.  Cross-encoder scoring still runs.
+    if settings.fast_mode:
+        logger.info("reranker_fast_mode", extra={"query_hash": query_hash})
         rerank_degraded = True
-        new_errors.append(make_budget_exceeded_error("reranker").model_dump())
-
-    except json.JSONDecodeError as exc:
-        logger.warning(
-            "explanation_parse_failed",
-            extra={"error": str(exc)[:200], "fallback": "no_explanations"},
-        )
         new_errors.append(
             ExtractionError(
                 node="reranker",
                 severity=ErrorSeverity.WARNING,
-                message=f"EXPLANATION_PARSE_FAILED: {str(exc)[:150]}",
+                message=PipelineEvent.RERANK_DEGRADED.value,
                 fallback_applied=True,
                 fallback_description=(
-                    "GPT returned invalid JSON for explanations. "
-                    "Results are re-ranked but without explanations."
+                    "fast_mode=true: LLM explanation generation skipped for lower latency. "
+                    "Cross-encoder ranking is still applied."
                 ),
             ).model_dump()
         )
 
-    except Exception as exc:
-        logger.warning(
-            "explanation_generation_failed",
-            extra={"error": str(exc)[:200], "fallback": "no_explanations"},
-        )
-        new_errors.append(
-            ExtractionError(
-                node="reranker",
-                severity=ErrorSeverity.WARNING,
-                message=f"EXPLANATION_FAILED: {str(exc)[:150]}",
-                fallback_applied=True,
-                fallback_description=(
-                    "LLM explanation call failed. Results are re-ranked "
-                    "by cross-encoder but without explanations."
-                ),
-            ).model_dump()
-        )
+    if not settings.fast_mode:
+        try:
+            check_budget(
+                state.get("cumulative_token_cost", 0.0),
+                "reranker",
+                query_hash,
+            )
+
+            ordered_for_llm = [rc["result"] for rc in reranked_candidates]
+            raw_explanations, prompt_tokens, completion_tokens = _generate_explanations(
+                query, ordered_for_llm, schema,
+            )
+
+            for entry in raw_explanations:
+                if isinstance(entry, dict):
+                    explanations_map[str(entry.get("id", ""))] = entry.get("explanation", "")
+
+            cost_usd = (prompt_tokens * 0.000000150) + (completion_tokens * 0.000000600)
+
+            new_token_usage.append(
+                TokenUsage(
+                    node="reranker",
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    cost_usd=round(cost_usd, 8),
+                ).model_dump()
+            )
+            updates["cumulative_token_cost"] = round(
+                state.get("cumulative_token_cost", 0.0) + cost_usd, 8
+            )
+
+            explanation_generated = True
+
+        except ValueError:
+            logger.warning(
+                "reranker_budget_exceeded",
+                extra={"fallback": "cross_encoder_only"},
+            )
+            rerank_degraded = True
+            new_errors.append(make_budget_exceeded_error("reranker").model_dump())
+
+        except json.JSONDecodeError as exc:
+            logger.warning(
+                "explanation_parse_failed",
+                extra={"error": str(exc)[:200], "fallback": "no_explanations"},
+            )
+            new_errors.append(
+                ExtractionError(
+                    node="reranker",
+                    severity=ErrorSeverity.WARNING,
+                    message=f"EXPLANATION_PARSE_FAILED: {str(exc)[:150]}",
+                    fallback_applied=True,
+                    fallback_description=(
+                        "GPT returned invalid JSON for explanations. "
+                        "Results are re-ranked but without explanations."
+                    ),
+                ).model_dump()
+            )
+
+        except Exception as exc:
+            logger.warning(
+                "explanation_generation_failed",
+                extra={"error": str(exc)[:200], "fallback": "no_explanations"},
+            )
+            new_errors.append(
+                ExtractionError(
+                    node="reranker",
+                    severity=ErrorSeverity.WARNING,
+                    message=f"EXPLANATION_FAILED: {str(exc)[:150]}",
+                    fallback_applied=True,
+                    fallback_description=(
+                        "LLM explanation call failed. Results are re-ranked "
+                        "by cross-encoder but without explanations."
+                    ),
+                ).model_dump()
+            )
 
     # ── Step 4: Citation audit + build RankedResult objects ───────────────
     reranked_results = []

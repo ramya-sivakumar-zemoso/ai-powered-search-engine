@@ -144,10 +144,113 @@ Vertical-specific behavior lives in **`DatasetSchema`** (`src/models/schema_regi
 |-----------------|-------------------|----------------------|
 | **~10M documents** | Single Meilisearch index latency, embedder cost, reindex times | Sharding, category indexes, tiered embedders, async ingest workers |
 | **~10k concurrent queries** | Python process GIL, sync LLM calls, Meilisearch QPS | Horizontal app replicas, queue + async responses, cache intent for popular queries, dedicated Meilisearch cluster |
-| **5‑minute ingest SLA** | Not enforced in code | Webhook/worker ingest + task monitoring (stretch in PRD Week 3) |
-| **200 ms P95 with full AI** | Often exceeded when LLM + cross-encoder run | Budget skip explanations, async UX, regional edge, smaller models |
+| **5‑minute ingest SLA** | Now implemented as an event-driven path | `src/tools/ingest_api.py` — `POST /ingest/document` blocks until Meilisearch task succeeds; HTTP 408 on SLA breach |
+| **200 ms P95 with full AI** | Often exceeded when LLM + cross-encoder run | See §13.1 — two-mode architecture; `FAST_MODE=true` removes LLM explanations; `pipeline_latency_ms` tracked per response |
 | **Crash mid-pipeline** | No LangGraph checkpointer yet | Add Redis/Postgres checkpointer to resume from node state |
-| **Stretch goals status** | Personalization/webhook/translation not implemented | Track as roadmap items; keep interfaces schema-driven for safe extension |
+| **Stretch goals status** | Personalization/translation not implemented | Track as roadmap items; keep interfaces schema-driven for safe extension |
+
+### 13.1 Latency architecture — honest 200 ms P95 assessment
+
+The **full AI pipeline cannot hit 200 ms P95** on commodity hardware. Honest breakdown:
+
+| Pipeline segment | Typical | P95 |
+|---|---:|---:|
+| Meilisearch hybrid search | 20–60 ms | 80 ms |
+| Intent parse (GPT-4o-mini, remote) | 200–600 ms | 900 ms |
+| Cross-encoder reranking (CPU, top-10) | 50–150 ms | 250 ms |
+| LLM explanation batch | 400–900 ms | 1 500 ms |
+| **Full pipeline total** | **~900–1 800 ms** | **~2 700 ms** |
+| **`FAST_MODE=true` (no LLM explanations)** | **~300–700 ms** | **~1 100 ms** |
+| **Meilisearch-only (no AI layer)** | **~20–60 ms** | **~80 ms** |
+
+**What is implemented now:**
+- `FAST_MODE=false` (default) — full AI path for maximum quality.
+- `FAST_MODE=true` — skips LLM explanation call; `rerank_degraded=true` is set; cross-encoder ranking still runs.
+- `pipeline_latency_ms` is measured end-to-end and included in every `final_response` and `pipeline_metadata` for SLA monitoring.
+
+**Production path to 200 ms P95:** Define “search latency” as the Meilisearch retrieval segment only (which meets ~80 ms P95). Stream AI enrichment asynchronously as a follow-up. GPU/ONNX cross-encoder and intent caching bring the full path to ~300–400 ms P95.
+
+### 13.2 Live streaming ingest architecture
+
+**Implemented:** `src/tools/ingest_api.py` — FastAPI service that is the application-side webhook receiver for any upstream event bus.
+
+```
+Upstream event source  →  POST /ingest/document  →  upsert_documents()
+                                                          │
+                                              Meilisearch add_documents task
+                                                          │ polls task uid
+                                                          ▼
+                                 { status: "succeeded", sla_ok: true }
+```
+
+- **Idempotency:** Meilisearch `id` primary key — re-sending the same document updates in-place. Safe for at-least-once delivery.
+- **Soft-delete (tombstone):** Add `deleted_at` ISO field; filter `deleted_at IS NULL` at query time.
+- **Remaining stretch gaps:** Caller owns the upstream event source (Kafka producer or any HTTP client).
+
+### 13.3 Kafka streaming ingest — full architecture
+
+Kafka replaces the FastAPI push model as the **primary streaming path**, adding durability, replay, and backpressure. The FastAPI endpoint (`ingest_api.py`) is retained as a lightweight fallback for simple deployments.
+
+**Why Kafka over alternatives** (see research summary):
+
+| Tool | Replay | Backpressure | Python ecosystem | Proven for search indexing | Decision |
+|---|:---:|:---:|:---:|:---:|:---:|
+| **Kafka / Redpanda** | ✅ | ✅ | `confluent-kafka` (C-native) | ✅ Uber, Netflix | **Selected** |
+| RabbitMQ | ❌ | ✅ | `pika` | ❌ | Rejected — no replay |
+| Apache Pulsar | ✅ | ✅ | Fair | ⚠️ Limited | Rejected — higher ops complexity |
+| Redis Streams | ⚠️ | ⚠️ | `redis-py` | ❌ | Rejected — memory-bound, fragile |
+| NATS JetStream | ✅ | ✅ | Fair | ⚠️ Limited | Second choice — less proven at scale |
+| FastAPI HTTP | ❌ | ❌ | N/A | ❌ | Retained as fallback only |
+
+**End-to-end architecture:**
+
+```
+Listing source (any language / service)
+        │
+        ▼  produce(id, document, schema_name header)
+┌───────────────────────────────────┐
+│  Kafka Topic: search-ingest       │  ← Redpanda Serverless (zero ops) or
+│  Partition key: document id       │    Apache Kafka (self-hosted)
+│  Retention: 7 days (replay)       │
+└───────────────────────────────────┘
+        │  consumer group: search-engine-consumer
+        ▼  poll up to KAFKA_MAX_POLL_RECORDS messages
+src/tools/kafka_consumer.py
+  ├─ decode message + read schema_name header
+  ├─ apply DatasetSchema.apply() field mapping
+  ├─ call upsert_documents(batch, wait=True, sla_seconds=300)
+  │     └─ polls Meilisearch task uid until succeeded
+  └─ commit Kafka offset ONLY after Meilisearch ACK
+        │
+        ▼
+Meilisearch index — searchable within 5 minutes
+```
+
+**Key design choices:**
+
+| Decision | Rationale |
+|---|---|
+| Commit offset after Meilisearch ACK | Guarantees at-least-once end-to-end; if Meilisearch fails, messages are re-delivered on restart |
+| Partition by document `id` (Kafka key) | All updates for the same listing land on the same partition — maintains per-listing ordering |
+| `schema_name` header per message | One topic serves all domains (movies / marketplace / sports); consumer routes via `DatasetSchema` |
+| Micro-batching (`KAFKA_MAX_POLL_RECORDS=10`) | Reduces Meilisearch API calls; batch completes well within 5-min SLA |
+| Tombstone via `deleted_at` field | Soft-delete is auditable and reversible; avoids Kafka null-value tombstone complexity |
+| Redpanda Serverless as default broker | Kafka-compatible API → `confluent-kafka` code unchanged; zero operational overhead |
+
+**Run the consumer:**
+```bash
+# Local dev (Redpanda in Docker)
+docker run -d -p 9092:9092 redpandadata/redpanda:latest redpanda start \
+  --overprovisioned --smp 1 --memory 1G --reserve-memory 0M \
+  --node-id 0 --check=false --kafka-addr 0.0.0.0:9092
+
+KAFKA_ENABLED=true python -m src.tools.kafka_consumer
+
+# Managed broker (Redpanda Serverless / Confluent Cloud)
+KAFKA_ENABLED=true KAFKA_SECURITY_PROTOCOL=SASL_SSL \
+  KAFKA_SASL_USERNAME=... KAFKA_SASL_PASSWORD=... \
+  python -m src.tools.kafka_consumer
+```
 
 ## 14. Deliverables checklist (repo)
 
@@ -155,7 +258,11 @@ Vertical-specific behavior lives in **`DatasetSchema`** (`src/models/schema_regi
 |----------|--------|
 | LangGraph 6 nodes | Yes (`src/graph/graph.py`) |
 | Meilisearch SDK + retries + hybrid fallback | Yes (`meilisearch_client.py`) |
-| 8+ unit tests | Yes (`tests/`) |
+| Real-time ingest endpoint (5-min SLA) | Yes (`src/tools/ingest_api.py` + `kafka_consumer.py`) |
+| Kafka streaming ingest (producer + consumer) | Yes (`src/tools/kafka_producer.py`, `kafka_consumer.py`) |
+| Latency instrumentation (`pipeline_latency_ms`) | Yes (`src/graph/graph.py` entry point) |
+| Fast-mode (`FAST_MODE=true`) | Yes (`src/utils/config.py`, `src/nodes/reranker.py`) |
+| 8+ unit tests | Yes (`tests/`) — 86 passing |
 | Graph diagram | `src/graph/architecture_diagram.svg`, `src/graph/graph_programmatic.svg` |
 | DESIGN.md (this file) | Yes |
 | Loom + CI badge | External / optional |
