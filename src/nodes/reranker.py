@@ -11,11 +11,11 @@ What this node does (plain English):
   6. Writes reranked_results to state as RankedResult objects
 
 Cross-encoder: configurable via RERANKER_MODEL in .env
-  (default: amberoad/bert-multilingual-passage-reranking-msmarco; English: cross-encoder/ms-marco-MiniLM-L12-v2)
-  - Lightweight (~80MB), runs on CPU, no API key needed
+  (default: BAAI/bge-reranker-v2-m3)
+  - Lightweight (~1.1GB), runs on CPU, no API key needed
   - Reads (query, result_text) pairs and outputs relevance logits
   - We apply sigmoid to convert logits to 0-1 confidence scores
-  - Downloaded from HuggingFace on first use (one-time ~80MB)
+  - Downloaded from Hugging Face on first use (one-time ~1.1GB)
 
 LLM explanations (PRD Section 4.6):
   - One batch GPT-4o-mini call for all results (token-efficient)
@@ -73,13 +73,13 @@ SYSTEM_PROMPT = PROMPT_PATH.read_text(encoding="utf-8")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  HELPER: Load cross-encoder (lazy — first call downloads ~80MB model)
+#  HELPER: Load cross-encoder (lazy — first call downloads one-time ~1.1GB model)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _get_cross_encoder():
     """Load the cross-encoder model on first use (lazy singleton).
 
-    The model is downloaded from HuggingFace on first invocation (~80MB).
+    The model is downloaded from Hugging Face on first invocation (one-time ~1.1GB).
     Subsequent calls return the cached instance. If RERANKER_MODEL changes
     in .env, a restart is needed (lru_cache on settings).
 
