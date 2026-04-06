@@ -87,3 +87,25 @@ def test_get_schema_known():
 def test_get_schema_unknown():
     with pytest.raises(ValueError, match="Unknown dataset schema"):
         get_schema("nonexistent")
+
+
+def test_get_schema_marketplace():
+    assert get_schema("marketplace").name == "marketplace"
+
+
+def test_meilisearch_attributes_to_retrieve():
+    m = get_schema("movies")
+    attrs = m.meilisearch_attributes_to_retrieve()
+    assert "id" in attrs and "title" in attrs and "poster" in attrs
+
+
+def test_normalized_evaluator_weights_sum_to_one():
+    schema = get_schema("marketplace")
+    weights = schema.normalized_evaluator_weights()
+    assert set(weights.keys()) == {
+        "semantic_relevance",
+        "result_coverage",
+        "ranking_stability",
+        "freshness_signal",
+    }
+    assert pytest.approx(sum(weights.values()), rel=1e-6) == 1.0

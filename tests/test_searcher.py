@@ -11,6 +11,16 @@ from src.nodes.searcher import (
     searcher_node,
 )
 from src.models.state import SearchResult
+from src.models.schema_registry import get_schema
+
+
+@pytest.fixture(autouse=True)
+def _mock_index_meta(mocker):
+    """Avoid HTTP to Meilisearch GET /indexes/{uid} in freshness reports."""
+    mocker.patch(
+        "src.nodes.searcher.get_index_updated_at_meta",
+        return_value=(None, True),
+    )
 
 
 # ── Filter String Builder ──────────────────────────────────────────────────
@@ -22,7 +32,7 @@ from src.models.state import SearchResult
     ({"year": "2020"}, None),
 ])
 def test_build_filter_string(filters, expected):
-    assert _build_filter_string(filters) == expected
+    assert _build_filter_string(filters, get_schema("movies")) == expected
 
 
 # ── Search Query Builder ────────────────────────────────────────────────────
@@ -56,16 +66,29 @@ def test_hits_to_search_results():
 def test_freshness_all_fresh():
     now = datetime.now(timezone.utc)
     results = [SearchResult(id="1", freshness_timestamp=now - timedelta(minutes=1))]
-    report = _build_freshness_report(results)
+    report = _build_freshness_report(
+        results, index_stats_updated_at=None, index_meta_ok=True,
+    )
     assert not report.staleness_flag
+    assert report.index_lag == 0.0
 
 
 def test_freshness_stale():
     old = datetime.now(timezone.utc) - timedelta(hours=2)
     results = [SearchResult(id="1", freshness_timestamp=old)]
-    report = _build_freshness_report(results)
+    report = _build_freshness_report(
+        results, index_stats_updated_at=None, index_meta_ok=True,
+    )
     assert report.staleness_flag
     assert {"id": "1", "title": ""} in report.stale_result_ids
+
+
+def test_freshness_unknown_when_index_meta_fails():
+    report = _build_freshness_report(
+        [], index_stats_updated_at=None, index_meta_ok=False,
+    )
+    assert report.freshness_unknown is True
+    assert report.index_lag == 0.0
 
 
 # ── Searcher Node (mocked Meilisearch) ─────────────────────────────────────
@@ -82,6 +105,7 @@ def test_searcher_node_success(mocker, state_factory):
     )
     result = searcher_node(state)
     assert len(result["search_results"]) == 1
+    assert result["partial_results"] is False
 
 
 def test_searcher_node_meili_down(mocker, state_factory):

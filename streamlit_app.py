@@ -1,17 +1,33 @@
 """
-NovaMart AI Search — end-user search results + pipeline inspector.
+AI Search — end-user results + pipeline inspector.
+
+Labels and demos follow ``DATASET_SCHEMA`` / ``MEILI_INDEX_NAME`` in ``.env``.
 
 Run:
-    streamlit run streamlit_app.py
+  streamlit run streamlit_app.py
 """
 
 import html
 import json
+import uuid
+
 import streamlit as st
 from src.graph.graph import run_search_with_trace
+from src.models.schema_registry import get_schema
+from src.utils.config import get_settings
 from src.utils.state_display import to_jsonable
 
-st.set_page_config(page_title="NovaMart Search", layout="wide", page_icon="🔍")
+_settings = get_settings()
+_ui_schema = get_schema(_settings.dataset_schema)
+
+if "pipeline_session_id" not in st.session_state:
+    st.session_state.pipeline_session_id = str(uuid.uuid4())
+
+st.set_page_config(
+    page_title=_ui_schema.ui_product_title,
+    layout="wide",
+    page_icon="🔍",
+)
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  STYLES
@@ -58,8 +74,22 @@ st.markdown("""
     padding: 2px 8px; border-radius: 3px; margin-bottom: 8px;
 }
 
+/* ── pipeline status badges ─────────────────────── */
+.status-badge {
+    display: inline-flex; align-items: center; gap: 5px;
+    font-size: 11px; font-weight: 600; letter-spacing: 0.05em;
+    padding: 3px 10px; border-radius: 12px; margin-right: 6px;
+    text-transform: uppercase;
+}
+.badge-warn {
+    background: #2d2200; color: #d29922; border: 1px solid #9e6a03;
+}
+.badge-ok {
+    background: #1a2d1a; color: #3fb950; border: 1px solid #238636;
+}
+
 /* ── search results page ────────────────────────── */
-.genre-tag {
+.facet-tag {
     font-size: 11px; padding: 2px 8px; border-radius: 10px;
     background: #1c2d4a; color: #58a6ff; border: 1px solid #1f6feb;
     display: inline-block; margin-right: 4px; margin-bottom: 4px;
@@ -111,12 +141,27 @@ NODE_LABELS = {
 
 PIPELINE_ORDER = list(NODE_LABELS.keys())
 
-POSTER_PLACEHOLDER = "https://via.placeholder.com/80x120/21262d/484f58?text=No+Poster"
+POSTER_PLACEHOLDER = "https://via.placeholder.com/80x120/21262d/484f58?text=No+Image"
 
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  HELPERS
 # ═════════════════════════════════════════════════════════════════════════════
+
+
+def _facet_tags_from_source(source: dict) -> list[str]:
+    """First non-empty ``ui_tag_fields`` entry becomes chips (comma-separated OK)."""
+    for field in _ui_schema.ui_tag_fields:
+        val = source.get(field)
+        if val is None or val == "":
+            continue
+        s = str(val).strip()
+        if not s:
+            continue
+        if "," in s:
+            return [x.strip() for x in s.split(",") if x.strip()][:5]
+        return [s][:5]
+    return []
 
 def node_chip(name: str) -> str:
     css = NODE_COLORS.get(name, "")
@@ -234,7 +279,16 @@ def _render_reporter_tab(delta: dict, max_hits: int) -> None:
         f1, f2, f3 = st.columns(3)
         f1.metric("Data Staleness", _fmt_staleness(max_s))
         f2.metric("Stale Results", f"{len(stale_ids)} / {fr.get('result_count', 0)}")
-        f3.metric("Index Updated", str(freshness.get("index_last_updated", "—"))[:10])
+        idx_api = freshness.get("index_stats_updated_at")
+        f3.metric(
+            "Index (API)",
+            str(idx_api)[:19] if idx_api else "—",
+        )
+        if freshness.get("freshness_unknown"):
+            st.caption(
+                "Index freshness metadata unavailable from Meilisearch "
+                "(PRD §4.3 `FRESHNESS_UNKNOWN`)."
+            )
 
     # ── Results table ────────────────────────────────────────────────
     results = fr.get("results", [])
@@ -323,16 +377,16 @@ def _render_card_body(result: dict, search_hit: dict | None) -> None:
 
     description = _truncate(source.get("description", ""), 280)
     category = source.get("category", "")
-    genres_all = source.get("genres_all", "")
-    poster = source.get("poster", "")
+    img_key = _ui_schema.ui_image_field
+    poster = source.get(img_key, "") if img_key else ""
     year = ""
     iso = source.get("indexed_at_iso", "")
     if iso:
         year = iso[:4]
 
-    genres = [g.strip() for g in genres_all.split(",") if g.strip()] if genres_all else []
-    if not genres and category:
-        genres = [category]
+    tags = _facet_tags_from_source(source)
+    if not tags and category:
+        tags = [category]
 
     confidence = result.get("confidence", 0.0)
     explanation = result.get("explanation", "")
@@ -347,13 +401,15 @@ def _render_card_body(result: dict, search_hit: dict | None) -> None:
         and _is_positive_explanation(explanation)
     )
 
-    col_poster, col_body = st.columns([1, 7])
-
-    with col_poster:
-        if poster:
-            st.image(poster, width=90)
-        else:
-            st.image(POSTER_PLACEHOLDER, width=90)
+    if img_key:
+        col_poster, col_body = st.columns([1, 7])
+        with col_poster:
+            if poster:
+                st.image(poster, width=90)
+            else:
+                st.image(POSTER_PLACEHOLDER, width=90)
+    else:
+        col_body = st.container()
 
     with col_body:
         year_str = f"  ({year})" if year else ""
@@ -366,11 +422,11 @@ def _render_card_body(result: dict, search_hit: dict | None) -> None:
             unsafe_allow_html=True,
         )
 
-        genre_tags = " ".join(
-            f'<span class="genre-tag">{html.escape(g)}</span>' for g in genres[:5]
+        facet_html = " ".join(
+            f'<span class="facet-tag">{html.escape(g)}</span>' for g in tags[:5]
         )
-        if genre_tags:
-            st.markdown(genre_tags, unsafe_allow_html=True)
+        if facet_html:
+            st.markdown(facet_html, unsafe_allow_html=True)
 
         if description:
             st.markdown(
@@ -389,6 +445,31 @@ def _render_card_body(result: dict, search_hit: dict | None) -> None:
             )
 
 
+def _render_pipeline_status_badges(fr: dict) -> None:
+    """Render partial_results / rerank_degraded status badges above results."""
+    partial = fr.get("partial_results", False)
+    degraded = fr.get("rerank_degraded", False)
+    if not partial and not degraded:
+        return
+    badges_html = ""
+    if partial:
+        badges_html += (
+            '<span class="status-badge badge-warn">'
+            '⚠ Partial Results — keyword fallback active'
+            '</span>'
+        )
+    if degraded:
+        badges_html += (
+            '<span class="status-badge badge-warn">'
+            '⚠ Rerank Degraded — using original ranking order'
+            '</span>'
+        )
+    st.markdown(
+        f'<div style="margin-bottom:10px;">{badges_html}</div>',
+        unsafe_allow_html=True,
+    )
+
+
 def render_serp(final_state: dict) -> None:
     """Render the consumer-facing search engine results page."""
     fr = final_state.get("final_response", {})
@@ -400,6 +481,8 @@ def render_serp(final_state: dict) -> None:
     if blocked:
         st.error("This query was blocked by our safety system.Please try with another query")
         return
+
+    _render_pipeline_status_badges(fr)
 
     results = fr.get("results", [])
     result_source = fr.get("result_source", "search")
@@ -471,9 +554,12 @@ def render_serp(final_state: dict) -> None:
 #  LAYOUT
 # ═════════════════════════════════════════════════════════════════════════════
 
-st.markdown('<div class="page-title">NovaMart AI Search</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="page-sub">AI-powered movie search engine</div>',
+    f'<div class="page-title">{html.escape(_ui_schema.ui_product_title)}</div>',
+    unsafe_allow_html=True,
+)
+st.markdown(
+    f'<div class="page-sub">{html.escape(_ui_schema.ui_product_subtitle)}</div>',
     unsafe_allow_html=True,
 )
 
@@ -483,7 +569,8 @@ col_input, col_hits, col_btn = st.columns([5, 1, 1])
 
 with col_input:
     query = st.text_input(
-        "Query", placeholder="e.g. Family movies, Pirates of the Caribbean or Weekend thriller movie with friends",
+        "Query",
+        placeholder=_ui_schema.ui_query_placeholder,
         label_visibility="collapsed",
     )
 with col_hits:
@@ -500,7 +587,10 @@ if run and not query.strip():
 if run and query.strip():
     with st.spinner("Searching…"):
         try:
-            final_state, trace = run_search_with_trace(query.strip())
+            final_state, trace = run_search_with_trace(
+                query.strip(),
+                session_id=st.session_state.pipeline_session_id,
+            )
         except Exception as exc:
             st.exception(exc)
             st.stop()

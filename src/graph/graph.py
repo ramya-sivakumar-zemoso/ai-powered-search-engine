@@ -22,6 +22,7 @@ requirements covered:
 from __future__ import annotations
 
 import time
+import uuid
 from typing import Any
 
 import langwatch
@@ -196,7 +197,10 @@ _compiled_app = compile_graph()
 # ══════════════════════════════════════════════════════════════════════════════
 
 @langwatch.trace()
-def run_search_with_trace(query: str) -> tuple[dict, list[dict]]:
+def run_search_with_trace(
+    query: str,
+    session_id: str | None = None,
+) -> tuple[dict, list[dict]]:
     """
     The main entry point for running a search query through the pipeline.
 
@@ -209,16 +213,20 @@ def run_search_with_trace(query: str) -> tuple[dict, list[dict]]:
 
     Args:
         query: The raw search string from the user (e.g. "wireless earbuds under $50")
-
+        session_id: Correlates traces across LangWatch; generated if omitted (PRD §5).
 
     Returns:
         ``(final_state, trace)`` where each trace item is
         ``{"node": str, "output": dict}`` — ``output`` is only the keys that
         node added or changed compared to the state before it ran (not the full state).
     """
-    logger.info("search_started", extra={"query": query})
+    sid = session_id or str(uuid.uuid4())
+    logger.info(
+        "search_started",
+        extra={"query": query, "session_id": sid},
+    )
 
-    initial_state = {"query": query}
+    initial_state = {"query": query, "session_id": sid}
     app = _compiled_app
     trace: list[dict] = []
     final_state: dict | None = None
@@ -243,6 +251,7 @@ def run_search_with_trace(query: str) -> tuple[dict, list[dict]]:
         "search_completed",
         extra={
             "query_hash": final_state.get("query_hash", ""),
+            "session_id": final_state.get("session_id", sid),
             "result_count": len(final_state.get("search_results", [])),
             "iteration_count": final_state.get("iteration_count", 0),
         },
@@ -251,7 +260,7 @@ def run_search_with_trace(query: str) -> tuple[dict, list[dict]]:
     return final_state, trace
 
 
-def run_search(query: str) -> dict:
+def run_search(query: str, session_id: str | None = None) -> dict:
     """
     The main entry point for running a search query through the pipeline.
 
@@ -260,9 +269,10 @@ def run_search(query: str) -> dict:
 
     Args:
         query: The raw search string from the user (e.g. "wireless earbuds under $50")
+        session_id: Optional trace correlation id (PRD §5).
 
     Returns:
         The final state dict containing search_results, quality_scores, errors, etc.
     """
-    final_state, _ = run_search_with_trace(query)
+    final_state, _ = run_search_with_trace(query, session_id=session_id)
     return final_state

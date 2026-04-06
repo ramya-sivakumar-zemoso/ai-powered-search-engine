@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import time
 
+from src.models.state import PipelineEvent
 from src.utils.logger import get_logger, log_node_exit
 from src.utils.langwatch_tracker import annotate_node_span
 
@@ -133,6 +134,82 @@ def _build_warnings(state: dict) -> list[dict]:
     return warnings
 
 
+def _build_structured_text_response(final_response: dict) -> str:
+    """Create a human-readable text view of the final response."""
+    lines: list[str] = []
+    lines.append(f"Query: {final_response.get('query', '')}")
+    lines.append(f"Query Hash: {final_response.get('query_hash', '')}")
+    lines.append(f"Session ID: {final_response.get('session_id', '')}")
+    lines.append(f"Blocked: {final_response.get('blocked', False)}")
+    lines.append(f"Partial Results: {final_response.get('partial_results', False)}")
+    lines.append(f"Rerank Degraded: {final_response.get('rerank_degraded', False)}")
+    lines.append(f"Result Count: {final_response.get('result_count', 0)}")
+    lines.append(f"Result Source: {final_response.get('result_source', 'none')}")
+    lines.append("")
+    lines.append("Top Results:")
+
+    results = final_response.get("results", [])
+    for i, r in enumerate(results[:5], start=1):
+        title = r.get("title") or "(untitled)"
+        rid = r.get("id", "")
+        conf = r.get("confidence")
+        if conf is None:
+            lines.append(f"{i}. [{rid}] {title}")
+        else:
+            lines.append(f"{i}. [{rid}] {title} (confidence={conf})")
+
+    warnings = final_response.get("warnings", [])
+    if warnings:
+        lines.append("")
+        lines.append("Warnings:")
+        for w in warnings:
+            lines.append(
+                f"- {w.get('severity', 'WARNING')} {w.get('node', '')}: "
+                f"{w.get('message', '')}"
+            )
+
+    return "\n".join(lines)
+
+
+def _is_partial_results(state: dict) -> bool:
+    """Return True when retrieval degraded and response is partial."""
+    if bool(state.get("partial_results", False)):
+        return True
+
+    for error in state.get("errors", []):
+        if not isinstance(error, dict):
+            continue
+        if error.get("message") in (
+            PipelineEvent.PARTIAL_RESULTS.value,
+            "HYBRID_FALLBACK",
+        ):
+            return True
+
+    return any(
+        isinstance(r, dict) and bool(r.get("is_fallback", False))
+        for r in state.get("search_results", [])
+    )
+
+
+def _is_rerank_degraded(state: dict, results: list[dict]) -> bool:
+    """Return True when reranker output is degraded and should be surfaced."""
+    if bool(state.get("rerank_degraded", False)):
+        return True
+
+    for r in results:
+        if isinstance(r, dict) and r.get("explanation_status") == "DEGRADED":
+            return True
+
+    for error in state.get("errors", []):
+        if not isinstance(error, dict):
+            continue
+        msg = str(error.get("message", ""))
+        if msg == PipelineEvent.RERANK_DEGRADED.value or "RERANK_DEGRADED" in msg:
+            return True
+
+    return False
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  MAIN NODE FUNCTION
 # ══════════════════════════════════════════════════════════════════════════════
@@ -159,12 +236,19 @@ def reporter_node(state: dict) -> dict:
     # ── Step 1: Pick the best available results ───────────────────────────
     results, result_source = _pick_best_results(state)
     blocked = _is_blocked(state)
+    partial_results = _is_partial_results(state)
+    rerank_degraded = _is_rerank_degraded(state, results)
 
     # ── Step 2: Build the final response payload ─────────────────────────
+    session_id = state.get("session_id", "")
+
     final_response = {
         "query": state.get("query", ""),
         "query_hash": query_hash,
+        "session_id": session_id,
         "blocked": blocked,
+        "partial_results": partial_results,
+        "rerank_degraded": rerank_degraded,
 
         "results": results,
         "result_count": len(results),
@@ -177,6 +261,7 @@ def reporter_node(state: dict) -> dict:
         "cost_summary": _build_cost_summary(state),
 
         "pipeline_metadata": {
+            "session_id": session_id,
             "strategy": strategy,
             "iterations": state.get("iteration_count", 0),
             "evaluator_decision": state.get("evaluator_decision", "N/A"),
@@ -186,6 +271,7 @@ def reporter_node(state: dict) -> dict:
 
         "warnings": _build_warnings(state),
     }
+    final_response["structured_text"] = _build_structured_text_response(final_response)
 
     # ── Step 3: Log and annotate node exit ────────────────────────────────
     duration_ms = (time.perf_counter() - start) * 1000
@@ -197,6 +283,8 @@ def reporter_node(state: dict) -> dict:
         extra={
             "result_source": result_source,
             "blocked": blocked,
+            "partial_results": partial_results,
+            "rerank_degraded": rerank_degraded,
             "warning_count": len(final_response["warnings"]),
         },
     )

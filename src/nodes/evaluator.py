@@ -33,9 +33,9 @@ Why these percentages (justification against PRD):
     Coverage ensures the retrieval strategy is casting a wide enough net.
   - freshness_signal (20%): Weighted meaningfully because the PRD requires
     staleness awareness (Section 4.3). For time-sensitive domains (news,
-    products), stale results degrade user trust. For our movie dataset this
-    signal is mild, but the weight ensures the system is production-ready
-    for any domain swap.
+    products), stale results degrade user trust. For static catalogs this
+    signal may be mild, but the weight keeps behavior aligned with PRD 4.3
+    for time-sensitive domains without code changes.
   - ranking_stability (10%): Lowest weight because near-duplicate results
     are an edge case, not the norm. When duplicates appear they hurt UX,
     but the reranker (downstream) further diversifies. This signal acts
@@ -47,13 +47,16 @@ from __future__ import annotations
 
 import time
 from difflib import SequenceMatcher
+from typing import Any
 
+from src.models.schema_registry import get_schema
 from src.models.state import (
     RetryPrescription,
     RetrievalStrategy,
     SearchAttempt,
     ExtractionError,
     ErrorSeverity,
+    PipelineEvent,
 )
 from src.utils.config import get_settings
 from src.utils.logger import get_logger, log_node_exit
@@ -71,12 +74,14 @@ ACCEPT_THRESHOLD = 0.65
 # PRD original: semantic_relevance=30%, result_coverage=22%, confidence=18%,
 #               ranking_stability=10%, freshness_signal=20%
 # After dropping confidence: 30+22+10+20 = 82% → renormalize to 100%
-WEIGHTS = {
+DEFAULT_WEIGHTS = {
     "semantic_relevance": 0.366,   # 30/82
     "result_coverage": 0.268,      # 22/82
     "ranking_stability": 0.122,    # 10/82
     "freshness_signal": 0.244,     # 20/82
 }
+
+SIGNAL_KEYS = tuple(DEFAULT_WEIGHTS.keys())
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -163,7 +168,7 @@ def _score_ranking_stability(results: list[dict]) -> float:
     """
     Scores how stable and diverse the ranking is — flags near-duplicates.
 
-    Near-duplicate results (e.g. "Star Wars" and "Star Wars: A New Hope")
+    Near-duplicate results (e.g. two listings with almost the same title)
     waste result slots and degrade user experience. This signal penalizes
     result sets where too many titles are similar.
 
@@ -219,8 +224,8 @@ def _score_freshness_signal(freshness_metadata: dict) -> float:
 
     PRD Section 4.3 requires staleness awareness in every response.
     For time-sensitive domains (news, products, live inventory), stale
-    results degrade user trust. For our movie dataset, most results are
-    historically "stale" by release_date, so the penalty is mild.
+    results degrade user trust. Depending on the catalog, timestamps may be
+    historical; tune thresholds via ``.env`` rather than hardcoding a vertical.
 
     The weight (20%) ensures the system is production-ready for any
     domain where freshness matters — no code change needed, just
@@ -250,7 +255,16 @@ def _score_freshness_signal(freshness_metadata: dict) -> float:
 #  HELPER: Compute combined quality score
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _compute_quality_score(state: dict) -> dict[str, float]:
+def _weights_for_active_schema() -> dict[str, float]:
+    """Resolve evaluator weights from active DatasetSchema with safe fallback."""
+    try:
+        schema = get_schema(settings.dataset_schema)
+        return schema.normalized_evaluator_weights()
+    except Exception:
+        return dict(DEFAULT_WEIGHTS)
+
+
+def _compute_quality_score(state: dict) -> dict[str, Any]:
     """
     Runs all 4 signals and returns a dict with individual + combined scores.
 
@@ -263,16 +277,28 @@ def _compute_quality_score(state: dict) -> dict[str, float]:
     """
     results = state.get("search_results", [])
     freshness = state.get("freshness_metadata", {})
+    weights = _weights_for_active_schema()
+
+    per_result_relevance = {}
+    for r in results:
+        if not isinstance(r, dict):
+            continue
+        rid = str(r.get("id", "")).strip()
+        if not rid:
+            continue
+        per_result_relevance[rid] = round(float(r.get("score", 0.0)), 4)
 
     scores = {
         "semantic_relevance": _score_semantic_relevance(results),
         "result_coverage": _score_result_coverage(results),
         "ranking_stability": _score_ranking_stability(results),
         "freshness_signal": _score_freshness_signal(freshness),
+        "per_result_relevance": per_result_relevance,
     }
 
-    combined = sum(scores[signal] * WEIGHTS[signal] for signal in WEIGHTS)
+    combined = sum(scores[signal] * weights[signal] for signal in SIGNAL_KEYS)
     scores["combined"] = round(combined, 4)
+    scores["weights_used"] = {k: round(v, 4) for k, v in weights.items()}
 
     return scores
 
@@ -353,7 +379,10 @@ def _build_retry_prescription(
     Returns:
         RetryPrescription with suggested changes.
     """
-    signal_scores = {k: v for k, v in quality_scores.items() if k != "combined"}
+    signal_scores = {
+        k: float(quality_scores.get(k, 0.0))
+        for k in SIGNAL_KEYS
+    }
     weakest = min(signal_scores, key=signal_scores.get)
 
     tried = {h.get("strategy", "") for h in search_history if isinstance(h, dict)}
@@ -497,7 +526,7 @@ def evaluator_node(state: dict) -> dict:
             ExtractionError(
                 node="evaluator",
                 severity=ErrorSeverity.WARNING,
-                message="ITERATIONS_EXHAUSTED",
+                message=PipelineEvent.ITERATION_LIMIT.value,
                 fallback_applied=True,
                 fallback_description=(
                     f"Quality score {combined:.2f} is below threshold "

@@ -16,6 +16,7 @@ from src.models.state import (
     SearchAttempt,
     RetrievalStrategy,
 )
+from src.models.schema_registry import get_schema
 from src.utils.config import get_settings
 from src.utils.llm import get_llm, strip_markdown_fences, extract_token_usage
 from src.utils.logger import get_logger, log_node_exit, log_injection_detection
@@ -34,6 +35,19 @@ settings = get_settings()
 # Any change to this prompt is a version bump (Working Flow doc requirement).
 PROMPT_PATH = Path(__file__).resolve().parent.parent / "prompts" / "intent_parse.txt"
 SYSTEM_PROMPT = PROMPT_PATH.read_text(encoding="utf-8")
+
+
+def _intent_system_prompt() -> str:
+    """Base intent prompt plus optional domain appendix from ``DatasetSchema``."""
+    schema = get_schema(settings.dataset_schema)
+    extra = schema.intent_parse_appendix.strip()
+    if not extra:
+        return SYSTEM_PROMPT
+    return (
+        f"{SYSTEM_PROMPT}\n\n"
+        f"## Domain-specific guidance ({schema.name})\n{extra}"
+    )
+
 
 # Lazy-cached injection scanner (avoids reloading ~400MB model on every call)
 _injection_scanner = None
@@ -98,7 +112,7 @@ def _parse_intent_with_llm(query: str) -> tuple[dict, int, int]:
     Calls GPT-4o-mini to parse the user query into structured intent.
 
     What it does:
-      - Sends the query with a fixed system prompt (from intent_parse.txt)
+      - Sends the query with the system prompt (intent_parse.txt + schema appendix)
       - GPT returns a JSON object with type, entities, filters, ambiguity_score, language
       - temperature=0 ensures the same query always produces the same output
 
@@ -114,7 +128,7 @@ def _parse_intent_with_llm(query: str) -> tuple[dict, int, int]:
     llm = get_llm()
 
     messages = [
-        SystemMessage(content=SYSTEM_PROMPT),
+        SystemMessage(content=_intent_system_prompt()),
         HumanMessage(content=query),
     ]
 

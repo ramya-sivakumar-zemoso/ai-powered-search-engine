@@ -23,7 +23,7 @@ LLM explanations (PRD Section 4.6):
   - Budget-aware: skips explanations if token budget is exceeded
 
 Citation audit (PRD Section 4.6):
-  - VERIFIED:   explanation references actual result content (title/description/genre)
+  - VERIFIED:   explanation references actual result content (title/description/facets)
   - DEGRADED:   explanation doesn't cite result content AND cross-encoder confidence
                  is below CONFIDENCE_THRESHOLD_DEGRADED
   - UNVERIFIED: explanation exists but doesn't reference result content
@@ -44,12 +44,15 @@ from pathlib import Path
 
 from langchain_core.messages import SystemMessage, HumanMessage
 
+from src.models.dataset_schema import DatasetSchema
+from src.models.schema_registry import get_schema
 from src.models.state import (
     RankedResult,
     ExplanationStatus,
     ExtractionError,
     ErrorSeverity,
     TokenUsage,
+    PipelineEvent,
 )
 from src.utils.config import get_settings
 from src.utils.llm import get_llm, strip_markdown_fences, extract_token_usage
@@ -119,6 +122,7 @@ def _get_cross_encoder():
 def _score_with_cross_encoder(
     query: str,
     results: list[dict],
+    schema: DatasetSchema | None = None,
 ) -> list[tuple[int, float]]:
     """Score each result against the query using the cross-encoder.
 
@@ -135,24 +139,27 @@ def _score_with_cross_encoder(
     Returns:
         List of (original_index, sigmoid_score) tuples, sorted descending.
     """
+    sch = schema or get_schema(settings.dataset_schema)
     model = _get_cross_encoder()
 
     pairs = []
+    labels = sch.rerank_field_labels
     for result in results:
-        title = result.get("title", "")
+        title = (result.get("title", "") or "").strip()
         source = result.get("source_fields", {})
-        description = source.get("description", "")
-        category = source.get("category", "")
-        genres = source.get("genres_all", "")
-
-        parts = [title]
-        if category:
-            parts.append(f"Category: {category}")
-        if genres:
-            parts.append(f"Genres: {genres}")
-        if description:
-            parts.append(description)
-        text = ". ".join(parts)
+        parts: list[str] = []
+        if title:
+            parts.append(title)
+        for field in sch.rerank_auxiliary_fields:
+            raw = source.get(field, "")
+            if raw is None or raw == "":
+                continue
+            if field == "description":
+                parts.append(str(raw))
+            else:
+                label = labels.get(field, field.replace("_", " ").title())
+                parts.append(f"{label}: {raw}")
+        text = ". ".join(parts) if parts else title or "."
         pairs.append((query, text))
 
     raw_scores = model.predict(pairs)
@@ -162,6 +169,16 @@ def _score_with_cross_encoder(
     indexed_scores = [(i, score) for i, score in enumerate(sigmoid_scores)]
     indexed_scores.sort(key=lambda x: x[1], reverse=True)
 
+    return indexed_scores
+
+
+def _native_meili_order(results: list[dict]) -> list[tuple[int, float]]:
+    """Return candidates ordered by original Meilisearch score (desc)."""
+    indexed_scores = [
+        (i, float(r.get("score", 0.0)))
+        for i, r in enumerate(results)
+    ]
+    indexed_scores.sort(key=lambda x: x[1], reverse=True)
     return indexed_scores
 
 
@@ -196,32 +213,33 @@ def _sanitize_field(text: str) -> str:
 #  HELPER: Build context string for the LLM explanation prompt
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _build_results_context(results: list[dict]) -> str:
+def _build_results_context(
+    results: list[dict],
+    schema: DatasetSchema | None = None,
+) -> str:
     """Build a text block with explicit content boundaries for each result.
 
-    Each field is wrapped in <doc_*> tags so the LLM can distinguish
-    document data from structural formatting (PRD Section 4.7 —
-    content boundary enforcement).
+    Each field is wrapped in `<doc_*>` tags (PRD 4.7). Dynamic fields come from
+    ``schema.rerank_auxiliary_fields`` (plus ``doc_title`` always).
     """
+    sch = schema or get_schema(settings.dataset_schema)
     lines = []
     for i, r in enumerate(results, 1):
         result_id = r.get("id", "?")
         title = _sanitize_field(r.get("title", "Untitled"))
-        category = _sanitize_field(r.get("source_fields", {}).get("category", ""))
-        genres = _sanitize_field(r.get("source_fields", {}).get("genres_all", ""))
-        description = _sanitize_field(r.get("source_fields", {}).get("description", ""))
-
-        if len(description) > 250:
-            description = description[:250] + "..."
+        source = r.get("source_fields", {})
 
         line = f'[Result {i}] id="{result_id}"'
         line += f', <doc_title>{title}</doc_title>'
-        if category:
-            line += f', <doc_category>{category}</doc_category>'
-        if genres:
-            line += f', <doc_genres>{genres}</doc_genres>'
-        if description:
-            line += f', <doc_description>{description}</doc_description>'
+        for field in sch.rerank_auxiliary_fields:
+            raw = source.get(field, "")
+            if raw is None or raw == "":
+                continue
+            text = _sanitize_field(str(raw))
+            if field == "description" and len(text) > 250:
+                text = text[:250] + "..."
+            tag = f"doc_{field}"
+            line += f", <{tag}>{text}</{tag}>"
         lines.append(line)
 
     return "\n".join(lines)
@@ -234,6 +252,7 @@ def _build_results_context(results: list[dict]) -> str:
 def _generate_explanations(
     query: str,
     ranked_results: list[dict],
+    schema: DatasetSchema | None = None,
 ) -> tuple[list[dict], int, int]:
     """Ask GPT-4o-mini to explain why each result matches the query.
 
@@ -242,7 +261,8 @@ def _generate_explanations(
     Returns:
         (explanations_list, prompt_tokens, completion_tokens)
     """
-    results_context = _build_results_context(ranked_results)
+    sch = schema or get_schema(settings.dataset_schema)
+    results_context = _build_results_context(ranked_results, sch)
     human_content = f"Query: {query}\n\nResults:\n{results_context}"
 
     llm = get_llm()
@@ -270,12 +290,13 @@ def _audit_citation(
     explanation: str,
     result: dict,
     confidence: float,
+    schema: DatasetSchema | None = None,
 ) -> tuple[ExplanationStatus, list[str]]:
     """Check if the explanation references actual content from the result.
 
     Logic (applied in order):
       1. No explanation text                        → ABSENT
-      2. Explanation cites title/description/genre   → VERIFIED
+      2. Explanation cites title/description/facets → VERIFIED
       3. Confidence < degraded threshold (uncited)   → DEGRADED
       4. Otherwise                                   → UNVERIFIED
 
@@ -290,12 +311,12 @@ def _audit_citation(
     if not explanation:
         return ExplanationStatus.ABSENT, []
 
+    sch = schema or get_schema(settings.dataset_schema)
+
     result_id = str(result.get("id", ""))
     title = result.get("title", "").lower()
     description = result.get("source_fields", {}).get("description", "").lower()
     category = result.get("source_fields", {}).get("category", "").lower()
-    genres = result.get("source_fields", {}).get("genres_all", "").lower()
-
     explanation_lower = explanation.lower()
     cited = False
 
@@ -317,11 +338,17 @@ def _audit_citation(
     if not cited and category and len(category) >= 3 and category in explanation_lower:
         cited = True
 
-    # Genre check: any genre name in explanation
-    if not cited and genres:
-        genre_list = [g.strip().lower() for g in genres.split(",") if len(g.strip()) >= 3]
-        if any(g in explanation_lower for g in genre_list):
-            cited = True
+    # Configurable tag fields (e.g. genres_all, comma-separated teams/tags)
+    if not cited:
+        for field in sch.citation_tag_fields:
+            raw = result.get("source_fields", {}).get(field, "")
+            blob = (raw or "").lower()
+            if not blob:
+                continue
+            tokens = [g.strip().lower() for g in blob.split(",") if len(g.strip()) >= 3]
+            if any(g in explanation_lower for g in tokens):
+                cited = True
+                break
 
     if cited:
         return ExplanationStatus.VERIFIED, [result_id]
@@ -367,6 +394,8 @@ def reranker_node(state: dict) -> dict:
 
     top_n = settings.reranker_top_n
     candidates = results[:top_n]
+    schema = get_schema(settings.dataset_schema)
+    rerank_degraded = False
 
     # ── Early exit: nothing to rerank ─────────────────────────────────────
     if not candidates:
@@ -378,23 +407,45 @@ def reranker_node(state: dict) -> dict:
 
     # ── Step 1: Cross-encoder scoring ─────────────────────────────────────
     try:
-        scored = _score_with_cross_encoder(query, candidates)
+        scored = _score_with_cross_encoder(query, candidates, schema)
     except Exception as exc:
         logger.warning(
             "cross_encoder_failed",
             extra={"error": str(exc)[:200], "fallback": "original_ranking"},
         )
-        scored = [(i, 1.0 - (i * 0.01)) for i in range(len(candidates))]
+        scored = _native_meili_order(candidates)
+        rerank_degraded = True
 
         new_errors.append(
             ExtractionError(
                 node="reranker",
                 severity=ErrorSeverity.WARNING,
-                message=f"CROSS_ENCODER_FAILED: {str(exc)[:150]}",
+                message=PipelineEvent.RERANK_DEGRADED.value,
                 fallback_applied=True,
                 fallback_description=(
                     "Cross-encoder model failed. Falling back to original "
-                    "Meilisearch ranking order."
+                    "Meilisearch ranking order. "
+                    f"Cause: {str(exc)[:150]}"
+                ),
+            ).model_dump()
+        )
+
+    if any(score < 0.0 or score > 1.0 for _, score in scored):
+        logger.warning(
+            "invalid_rerank_confidence",
+            extra={"fallback": "original_ranking"},
+        )
+        scored = _native_meili_order(candidates)
+        rerank_degraded = True
+        new_errors.append(
+            ExtractionError(
+                node="reranker",
+                severity=ErrorSeverity.WARNING,
+                message=PipelineEvent.RERANK_DEGRADED.value,
+                fallback_applied=True,
+                fallback_description=(
+                    "Reranker confidence out of valid range [0.0, 1.0]. "
+                    "Falling back to native Meilisearch ranking."
                 ),
             ).model_dump()
         )
@@ -425,7 +476,7 @@ def reranker_node(state: dict) -> dict:
 
         ordered_for_llm = [rc["result"] for rc in reranked_candidates]
         raw_explanations, prompt_tokens, completion_tokens = _generate_explanations(
-            query, ordered_for_llm,
+            query, ordered_for_llm, schema,
         )
 
         for entry in raw_explanations:
@@ -453,6 +504,7 @@ def reranker_node(state: dict) -> dict:
             "reranker_budget_exceeded",
             extra={"fallback": "cross_encoder_only"},
         )
+        rerank_degraded = True
         new_errors.append(make_budget_exceeded_error("reranker").model_dump())
 
     except json.JSONDecodeError as exc:
@@ -501,7 +553,9 @@ def reranker_node(state: dict) -> dict:
         explanation = explanations_map.get(result_id, "")
 
         if explanation_generated and explanation:
-            status, citation_ids = _audit_citation(explanation, result, confidence)
+            status, citation_ids = _audit_citation(
+                explanation, result, confidence, schema,
+            )
         else:
             status = ExplanationStatus.ABSENT
             citation_ids = []
@@ -520,6 +574,7 @@ def reranker_node(state: dict) -> dict:
         reranked_results.append(ranked.model_dump())
 
     updates["reranked_results"] = reranked_results
+    updates["rerank_degraded"] = rerank_degraded
 
     # ── Step 5: Compute aggregate rerank_confidence signal (PRD 5th signal)
     quality_scores = dict(state.get("quality_scores", {}))
@@ -527,10 +582,23 @@ def reranker_node(state: dict) -> dict:
         confidences = [r["confidence"] for r in reranked_results]
         mean_conf = sum(confidences) / len(confidences)
         quality_scores["rerank_confidence"] = round(mean_conf, 4)
+        quality_scores["rerank_low_confidence_ratio"] = round(
+            sum(1 for c in confidences if c < settings.confidence_threshold_degraded)
+            / len(confidences),
+            4,
+        )
+        quality_scores["per_result_rerank_confidence"] = {
+            str(r["id"]): round(float(r["confidence"]), 4)
+            for r in reranked_results
+        }
     else:
         quality_scores["rerank_confidence"] = 0.0
         quality_scores["rerank_low_confidence_ratio"] = 1.0
+        quality_scores["per_result_rerank_confidence"] = {}
     updates["quality_scores"] = quality_scores
+
+    if any(r.get("explanation_status") == "DEGRADED" for r in reranked_results):
+        updates["rerank_degraded"] = True
 
     # ── Step 6: Log and annotate node exit ────────────────────────────────
     duration_ms = (time.perf_counter() - start) * 1000

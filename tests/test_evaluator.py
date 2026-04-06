@@ -71,6 +71,7 @@ def test_compute_quality_score(results_factory, state_factory):
     expected_keys = {
         "semantic_relevance", "result_coverage",
         "ranking_stability", "freshness_signal", "combined",
+        "per_result_relevance", "weights_used",
     }
     assert set(scores.keys()) == expected_keys
     assert 0.0 <= scores["combined"] <= 1.0
@@ -108,4 +109,4 @@ def test_evaluator_exhausted(state_factory):
     state = state_factory(iteration_count=2)
     result = evaluator_node(state)
     assert result["evaluator_decision"] == "exhausted"
-    assert any(e.get("message") == "ITERATIONS_EXHAUSTED" for e in result["errors"])
+    assert any(e.get("message") == "ITERATION_LIMIT" for e in result["errors"])
