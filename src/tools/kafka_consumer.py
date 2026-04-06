@@ -67,7 +67,7 @@ logger = get_logger(__name__)
 settings = get_settings()
 
 try:
-    from confluent_kafka import Consumer, KafkaError, KafkaException, TopicPartition
+    from confluent_kafka import Consumer, KafkaError, KafkaException
     _CONFLUENT_AVAILABLE = True
 except ImportError:
     _CONFLUENT_AVAILABLE = False
@@ -135,12 +135,16 @@ def _decode_message(msg: Any) -> tuple[dict[str, Any], str]:
     return payload, schema_name
 
 
-def _apply_schema(document: dict[str, Any], schema_name: str) -> dict[str, Any]:
-    """Apply DatasetSchema field mapping to normalise the document."""
+def _apply_schema(document: dict[str, Any], schema_name: str) -> dict[str, Any] | None:
+    """Apply DatasetSchema field mapping to normalise the document.
+
+    Returns ``None`` when ``DatasetSchema.apply`` rejects the row (e.g. title too short).
+    """
     try:
         schema = get_schema(schema_name)
         if hasattr(schema, "apply"):
-            return schema.apply(document)
+            row_index = abs(hash(str(document.get("id", "")))) % (10**9)
+            return schema.apply(document, row_index)
     except Exception as exc:
         logger.warning(
             "schema_apply_failed",
@@ -209,6 +213,16 @@ class SearchIngestConsumer:
 
     # ── Core poll-and-process ─────────────────────────────────────────────────
 
+    def _commit_single(self, msg: Any, reason: str) -> None:
+        """Commit one message offset so bad payloads do not block the partition forever."""
+        try:
+            self._consumer.commit(msg, asynchronous=False)
+        except Exception as exc:
+            logger.error(
+                "kafka_single_commit_failed",
+                extra={"reason": reason, "error": str(exc)},
+            )
+
     def _poll_and_process(self) -> None:
         """Poll up to KAFKA_MAX_POLL_RECORDS messages and upsert as one batch."""
         messages = self._consumer.consume(
@@ -244,9 +258,23 @@ class SearchIngestConsumer:
                         "partition": msg.partition(),
                     },
                 )
+                self._commit_single(msg, "skip_invalid_payload")
                 continue
 
             normalised = _apply_schema(document, schema_name)
+            if normalised is None:
+                logger.warning(
+                    "kafka_message_skipped",
+                    extra={
+                        "reason": "schema_rejected",
+                        "offset": msg.offset(),
+                        "partition": msg.partition(),
+                        "id": document.get("id"),
+                    },
+                )
+                self._commit_single(msg, "skip_schema_rejected")
+                continue
+
             batches.setdefault(schema_name, []).append(normalised)
             raw_messages.append(msg)
 

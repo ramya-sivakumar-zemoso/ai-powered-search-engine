@@ -249,6 +249,7 @@ def run_search_with_trace(
         final_state = {}
 
     pipeline_latency_ms = round((time.time() - t_start) * 1000, 1)
+    final_state["pipeline_latency_ms"] = pipeline_latency_ms
 
     # Surface latency in the final_response so callers can assert SLAs.
     if isinstance(final_state.get("final_response"), dict):

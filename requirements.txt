@@ -36,3 +36,7 @@ pytest-cov==6.0.0
 
 # UI
 streamlit==1.55.0
+
+# Optional — real-time ingest (install when using Kafka or FastAPI ingest API)
+# pip install confluent-kafka fastapi "uvicorn[standard]"
+# Or: pip install -e ".[streaming]"

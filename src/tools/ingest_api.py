@@ -122,7 +122,19 @@ def _build_meili_doc(doc: IngestDocument) -> dict[str, Any]:
     if "indexed_at" not in flat:
         from datetime import datetime, timezone
         flat["indexed_at"] = datetime.now(timezone.utc).isoformat()
-    return schema.apply(flat) if hasattr(schema, "apply") else flat
+    if not hasattr(schema, "apply"):
+        return flat
+    # DatasetSchema.apply(raw, row_index) — row_index only affects fallback id / indexed_at jitter.
+    applied = schema.apply(flat, 0)
+    if applied is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "Document rejected by schema rules (e.g. title shorter than 3 characters). "
+                "Adjust payload or schema field_mappings."
+            ),
+        )
+    return applied
 
 
 # ─────────────────────────────────────────────────────────────────────────────
