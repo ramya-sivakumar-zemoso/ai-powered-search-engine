@@ -81,6 +81,47 @@ def test_reporter_accept_path(state_factory):
     assert resp["result_source"] == "reranked"
     assert resp["result_count"] == 1
     assert resp["blocked"] is False
+    assert resp["partial_results"] is False
+    assert resp["rerank_degraded"] is False
+    assert "Top Results:" in resp["structured_text"]
+    assert resp["session_id"] == "test-session"
+    assert resp["pipeline_metadata"]["session_id"] == "test-session"
+
+
+def test_reporter_zero_results(state_factory):
+    """PRD §5: zero-result handling — reporter emits result_count=0, source=none."""
+    state = state_factory(search_results=[], reranked_results=[])
+    resp = reporter_node(state)["final_response"]
+    assert resp["result_count"] == 0
+    assert resp["result_source"] == "none"
+    assert resp["blocked"] is False
+
+
+def test_reporter_surfaces_structured_text(state_factory):
+    """PRD §4.1 reporter: multi-format emission — structured_text must be present."""
+    state = state_factory(
+        reranked_results=[{"id": "1", "title": "Star Wars", "confidence": 0.9}],
+    )
+    resp = reporter_node(state)["final_response"]
+    txt = resp.get("structured_text", "")
+    assert "Top Results:" in txt
+    assert "Star Wars" in txt
+
+
+def test_reporter_error_propagation(state_factory):
+    """PRD §5: errors set by upstream nodes must appear in final_response warnings."""
+    state = state_factory(
+        errors=[{
+            "message": "FILTER_RELAXATION_APPLIED",
+            "severity": "WARNING",
+            "node": "searcher",
+            "fallback_description": "relaxed filters",
+        }],
+        search_results=[{"id": "1", "title": "Item", "score": 0.8, "source_fields": {}}],
+    )
+    resp = reporter_node(state)["final_response"]
+    messages = [w["message"] for w in resp["warnings"]]
+    assert "FILTER_RELAXATION_APPLIED" in messages
 
 
 def test_reporter_blocked_path(state_factory):
@@ -91,6 +132,7 @@ def test_reporter_blocked_path(state_factory):
     result = reporter_node(state)
     resp = result["final_response"]
     assert resp["blocked"] is True
+    assert resp["partial_results"] is False
     assert resp["result_source"] == "none"
     assert resp["result_count"] == 0
     assert len(resp["warnings"]) == 1

@@ -2,6 +2,10 @@
 
 Hybrid search on **Meilisearch** (keyword + semantic) with **multilingual E5** embeddings (`intfloat/multilingual-e5-large` via `EMBEDDING_MODEL`) on the index, and a **BGE** cross-encoder reranker (`BAAI/bge-reranker-v2-m3` via `RERANKER_MODEL`) in the pipeline.
 
+The codebase is **domain-agnostic**: movies, e-commerce, sports (and others) are configured by a **`DatasetSchema`** in `src/models/schema_registry.py`, selected with **`DATASET_SCHEMA`** in `.env`. Ingest maps raw columns → the shared internal document shape (`title`, `description`, `category`, `brand`, …) via **`FieldMapping`**. The pipeline (intent parsing, filters, retrieve fields, reranker text, Streamlit labels) reads that schema so behavior stays consistent across verticals.
+
+**Architecture, PRD mapping, and trade-offs:** see **[DESIGN.md](DESIGN.md)**. **Trace correlation:** pass `--session-id` to `main.py` or use Streamlit (session id in app state); responses include `session_id` and `query_hash`.
+
 ## Requirements
 
 - Python 3.12+
@@ -39,9 +43,57 @@ Optional env defaults: `DATASET_FILE`, `DATASET_SCHEMA` (see `.env.example`).
 python scripts/verify_search.py --schema movies
 ```
 
+## Response flags
+
+Every pipeline response includes the following top-level flags for downstream monitoring:
+
+| Flag | Type | Description |
+|---|---|---|
+| `partial_results` | `bool` | `true` when hybrid retrieval degraded to keyword-only fallback |
+| `rerank_degraded` | `bool` | `true` when cross-encoder failed or produced out-of-range confidence; native Meilisearch ranking was used instead |
+| `structured_text` | `str` | Human-readable text summary of results for logging / non-JSON consumers |
+
+Quality scores returned per query also include:
+
+- `per_result_relevance` — `{id: score}` mapping of raw Meilisearch scores
+- `per_result_rerank_confidence` — `{id: confidence}` mapping of cross-encoder confidence per result
+- `weights_used` — the actual evaluator signal weights applied (from the active `DatasetSchema`)
+
+## Evaluator signal weights
+
+Each `DatasetSchema` carries `evaluator_signal_weights` (normalised at runtime) to tune how much each signal influences the combined quality score:
+
+```python
+evaluator_signal_weights = {
+    "semantic_relevance": 0.42,   # query–result embedding similarity
+    "result_coverage":    0.31,   # fraction of results above score threshold
+    "ranking_stability":  0.14,   # rank order consistency across retries
+    "freshness_signal":   0.13,   # recency of indexed documents
+}
+```
+
+Override in `schema_registry.py` per domain (marketplace, sports, movies, …).
+
+## Graph diagram
+
+Export a Mermaid + SVG diagram of the pipeline topology:
+
+```bash
+python scripts/export_graph_diagram.py
+# outputs: src/graph/graph_topology.mmd  and  src/graph/graph_programmatic.svg
+```
+
 ## Layout
 
 - `src/tools/setup_index.py` — index lifecycle + batch ingest
 - `src/tools/meilisearch_client.py` — search, stats, tasks (REST)
-- `src/models/schema_registry.py` — dataset schemas
+- `src/models/schema_registry.py` — dataset schemas (`movies`, `marketplace`, `sports`, …)
+- `src/models/dataset_schema.py` — `FieldMapping`, transforms, `meilisearch_attributes_to_retrieve()`
 - `src/tools/dataset_loader.py` — load files → normalise via schema
+- `scripts/export_graph_diagram.py` — programmatic LangGraph topology export
+
+### Adding a new domain
+
+1. Copy an existing schema in `schema_registry.py` and adjust `field_mappings` (source column names), `searchable_fields`, `filterable_fields`, `filter_aliases_llm`, `embedder_template`, and UI fields (`ui_*`, `demo_queries`).
+2. Register it in `SCHEMA_REGISTRY`.
+3. Set `DATASET_SCHEMA` and `MEILI_INDEX_NAME` (and `DATASET_FILE`) in `.env`, then run `python -m src.tools.setup_index`.

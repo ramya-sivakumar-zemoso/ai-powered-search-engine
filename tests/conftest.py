@@ -31,6 +31,7 @@ def state_factory():
         base = {
             "query": "test query",
             "query_hash": "abc123",
+            "session_id": "test-session",
             "search_results": [],
             "freshness_metadata": {},
             "retrieval_strategy": "HYBRID",

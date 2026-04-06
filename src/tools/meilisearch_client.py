@@ -8,15 +8,18 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 import meilisearch
+import requests
 from meilisearch.errors import (
     MeilisearchApiError,
     MeilisearchCommunicationError,
     MeilisearchTimeoutError,
 )
 
+from src.models.schema_registry import get_schema
 from src.utils.config import get_settings
 from src.utils.logger import get_logger
 
@@ -123,12 +126,8 @@ def _execute_search(
 def _retrieve_fields(fields: list[str] | None) -> list[str]:
     if fields:
         return fields
-    return [
-        "id", "title", "description", "overview",
-        "category", "genres_all", "brand", "price",
-        "rating", "in_stock", "indexed_at", "indexed_at_iso",
-        "poster",
-    ]
+    schema = get_schema(settings.dataset_schema)
+    return schema.meilisearch_attributes_to_retrieve()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -239,6 +238,48 @@ def search(
         query, limit=limit, filters=filters,
         retrieve_fields=retrieve_fields, index_name=index_name,
     )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Index metadata (PRD §4.3 — index freshness monitor)
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _parse_meili_iso_datetime(raw: str | None) -> datetime | None:
+    if not raw:
+        return None
+    s = str(raw).replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except (ValueError, TypeError):
+        return None
+
+
+def get_index_updated_at_meta(index_name: str | None = None) -> tuple[datetime | None, bool]:
+    """Fetch index ``updatedAt`` from Meilisearch.
+
+    Returns:
+        (parsed_utc_datetime, meta_ok). If ``meta_ok`` is False, callers should set
+        ``freshness_unknown`` on the response (PRD §4.3).
+    """
+    idx = index_name or settings.meili_index_name
+    base = settings.meili_url.rstrip("/")
+    headers = {"Authorization": f"Bearer {settings.meili_master_key}"}
+    try:
+        r = requests.get(f"{base}/indexes/{idx}", headers=headers, timeout=5)
+        r.raise_for_status()
+        data = r.json()
+        raw = data.get("updatedAt") or data.get("updated_at")
+        return (_parse_meili_iso_datetime(raw), True)
+    except Exception as exc:
+        logger.warning(
+            "index_meta_unavailable",
+            extra={"index": idx, "error": str(exc)[:200]},
+        )
+        return (None, False)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

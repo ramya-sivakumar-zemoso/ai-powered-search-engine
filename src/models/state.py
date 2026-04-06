@@ -33,6 +33,13 @@ class ExplanationStatus(str, Enum):
     DEGRADED = "DEGRADED"
     ABSENT = "ABSENT"
 
+
+class PipelineEvent(str, Enum):
+    """Canonical contract events surfaced to downstream consumers."""
+    PARTIAL_RESULTS = "PARTIAL_RESULTS"
+    RERANK_DEGRADED = "RERANK_DEGRADED"
+    ITERATION_LIMIT = "ITERATION_LIMIT"
+
 # ── Small models  ────────────────────────────────────────────
 class ExtractionError(BaseModel):
     """A structured error recorded by any node that encounters a problem."""
@@ -79,11 +86,20 @@ class RankedResult(BaseModel):
     explanation_status: ExplanationStatus = ExplanationStatus.ABSENT
 
 class FreshnessReport(BaseModel):
-    """Index freshness metadata surfaced in every response (PRD Section 4.3)."""
+    """Freshness metadata for every response (PRD Section 4.3).
+
+    ``index_stats_updated_at`` comes from Meilisearch index metadata when the API
+    succeeds. ``index_last_updated`` remains the oldest hit timestamp among results
+    (document-level proxy). ``freshness_unknown`` is True when index metadata could
+    not be fetched (stats/index API failure).
+    """
     index_last_updated: datetime | None = None
+    index_stats_updated_at: datetime | None = None
     staleness_flag: bool = False
     stale_result_ids: list[dict] = Field(default_factory=list)
     max_staleness_seconds: float = 0.0
+    index_lag: float = 0.0
+    freshness_unknown: bool = False
 
 class RetryPrescription(BaseModel):
     """Evaluator's recommendation for what to change on a retry attempt."""
@@ -108,6 +124,8 @@ class SearchState(BaseModel):
     # Original user query
     query: str = ""
     query_hash: str = ""
+    # Traceability (PRD Section 5 — LangWatch / observability)
+    session_id: str = ""
     # query_understander output
     parsed_intent: IntentModel = Field(default_factory=IntentModel)
     # retrieval_router output
@@ -120,9 +138,11 @@ class SearchState(BaseModel):
     # reranker output
     reranked_results: list[RankedResult] = Field(default_factory=list)
     # evaluator output
-    quality_scores: dict[str, float] = Field(default_factory=dict)
+    quality_scores: dict[str, Any] = Field(default_factory=dict)
     evaluator_decision: str = ""
     retry_prescription: RetryPrescription | None = None
+    partial_results: bool = False
+    rerank_degraded: bool = False
     # Loop prevention (PRD Section 4.5)
     iteration_count: int = 0
     search_history: list[SearchAttempt] = Field(default_factory=list)
@@ -147,6 +167,7 @@ class SearchStateDict(TypedDict, total=False):
     # ── identity ──
     query: str
     query_hash: str
+    session_id: str
     # ── query_understander output ──
     parsed_intent: dict
     # ── retrieval_router output ──
@@ -159,10 +180,12 @@ class SearchStateDict(TypedDict, total=False):
     # ── reranker output ──
     reranked_results: list[dict]
     # ── evaluator output ──
-    quality_scores: dict[str, float]
+    quality_scores: dict[str, Any]
     evaluator_decision: str
     retry_prescription: dict | None
     iteration_count: int
+    partial_results: bool
+    rerank_degraded: bool
     # ── accumulated lists (operator.add reducer) ──
     search_history: Annotated[list, operator.add]
     token_usage: Annotated[list, operator.add]

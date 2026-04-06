@@ -100,6 +100,107 @@ class DatasetSchema(BaseModel):
     embedder_template: str = "{{doc.title}} {{doc.description}}"
     description_fallback_template: str = ""
 
+    # ── Search / Meilisearch (per-domain) ─────────────────────────────────
+    query_stop_words_extra: list[str] = Field(
+        default_factory=list,
+        description="Merged with English baseline stop words for keyword-overlap logic.",
+    )
+    filter_aliases_llm: dict[str, str] = Field(
+        default_factory=dict,
+        description="Lowercased LLM filter keys → Meilisearch attribute names.",
+    )
+    keyword_overlap_fields: list[str] = Field(
+        default_factory=lambda: ["title", "description"],
+        description="Hit fields scanned for semantic-degradation keyword overlap.",
+    )
+
+    # ── Reranker / citations ───────────────────────────────────────────────
+    rerank_auxiliary_fields: list[str] = Field(
+        default_factory=lambda: ["category", "description"],
+        description="source_fields keys appended to cross-encoder text (order matters).",
+    )
+    rerank_field_labels: dict[str, str] = Field(
+        default_factory=dict,
+        description="Optional pretty labels for auxiliary fields in cross-encoder text.",
+    )
+    citation_tag_fields: list[str] = Field(
+        default_factory=list,
+        description="Fields treated as comma-separated tokens for citation matching.",
+    )
+    evaluator_signal_weights: dict[str, float] = Field(
+        default_factory=lambda: {
+            "semantic_relevance": 0.366,
+            "result_coverage": 0.268,
+            "ranking_stability": 0.122,
+            "freshness_signal": 0.244,
+        },
+        description=(
+            "Pre-rerank evaluator weights for semantic_relevance/result_coverage/"
+            "ranking_stability/freshness_signal. Values are normalized at runtime."
+        ),
+    )
+
+    # ── Intent LLM ─────────────────────────────────────────────────────────
+    intent_parse_appendix: str = Field(
+        default="",
+        description="Appended to the base intent prompt for domain-specific examples.",
+    )
+
+    # ── Demo / UI ──────────────────────────────────────────────────────────
+    demo_queries: dict[str, str] | None = Field(
+        default=None,
+        description="If set, overrides CLI demo queries for this schema.",
+    )
+    ui_product_title: str = Field(
+        default="AI Search",
+        description="Short product name for Streamlit / CLI headers.",
+    )
+    ui_product_subtitle: str = Field(
+        default="Hybrid keyword + semantic search over your catalog",
+        description="One-line subtitle under the product title.",
+    )
+    ui_query_placeholder: str = Field(
+        default="Search the catalog…",
+        description="Placeholder for the search box.",
+    )
+    ui_image_field: str | None = Field(
+        default="poster",
+        description="source_fields key for thumbnail; None to hide image column.",
+    )
+    ui_tag_fields: list[str] = Field(
+        default_factory=lambda: ["category"],
+        description="Ordered list: first non-empty field supplies facet tags (comma-split).",
+    )
+
+    def meilisearch_attributes_to_retrieve(self) -> list[str]:
+        """Attributes for Meilisearch ``attributesToRetrieve`` for this index."""
+        names: set[str] = {"id"}
+        names.update(self.field_mappings.keys())
+        names.update(self.extra_passthrough_fields)
+        return sorted(names)
+
+    def normalized_evaluator_weights(self) -> dict[str, float]:
+        """Return normalized 4-signal evaluator weights for this schema."""
+        keys = (
+            "semantic_relevance",
+            "result_coverage",
+            "ranking_stability",
+            "freshness_signal",
+        )
+        raw = {
+            k: max(float(self.evaluator_signal_weights.get(k, 0.0)), 0.0)
+            for k in keys
+        }
+        total = sum(raw.values())
+        if total <= 0:
+            return {
+                "semantic_relevance": 0.366,
+                "result_coverage": 0.268,
+                "ranking_stability": 0.122,
+                "freshness_signal": 0.244,
+            }
+        return {k: raw[k] / total for k in keys}
+
     def apply(self, raw: dict[str, Any], row_index: int) -> dict[str, Any] | None:
         doc: dict[str, Any] = {}
         for internal_field, mapping in self.field_mappings.items():
