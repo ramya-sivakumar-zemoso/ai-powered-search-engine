@@ -79,6 +79,11 @@ class FieldMapping(BaseModel):
     default: Any = None
 
 
+_PLACEHOLDER_DESCRIPTIONS = frozenset({
+    "", "no overview found.", "no overview found", "no description",
+})
+
+
 class DatasetSchema(BaseModel):
     name: str
     description: str = ""
@@ -93,6 +98,7 @@ class DatasetSchema(BaseModel):
     )
     sortable_fields: list[str] = Field(default=["indexed_at"])
     embedder_template: str = "{{doc.title}} {{doc.description}}"
+    description_fallback_template: str = ""
 
     def apply(self, raw: dict[str, Any], row_index: int) -> dict[str, Any] | None:
         doc: dict[str, Any] = {}
@@ -109,6 +115,8 @@ class DatasetSchema(BaseModel):
         if self._should_skip_short_title(raw, doc):
             return None
 
+        self._apply_description_fallback(doc)
+
         if not doc.get("indexed_at"):
             offset = int(hashlib.md5(str(row_index).encode()).hexdigest(), 16) % 21600
             doc["indexed_at"] = int(time.time()) - offset
@@ -122,6 +130,21 @@ class DatasetSchema(BaseModel):
                 doc[field] = raw[field]
 
         return doc
+
+    def _apply_description_fallback(self, doc: dict[str, Any]) -> None:
+        """Fill empty or placeholder descriptions using the fallback template.
+
+        Prevents degenerate embeddings for documents whose description field
+        is empty — the embedder would otherwise encode only the title and
+        genre, producing a generic vector near the centroid.
+        """
+        if not self.description_fallback_template:
+            return
+        desc = str(doc.get("description", "")).strip()
+        if desc.lower() in _PLACEHOLDER_DESCRIPTIONS:
+            doc["description"] = self.description_fallback_template.format_map(
+                {k: v for k, v in doc.items() if isinstance(v, str)}
+            )
 
     def _should_skip_short_title(self, raw: dict[str, Any], doc: dict[str, Any]) -> bool:
         title_mapping = self.field_mappings.get("title")

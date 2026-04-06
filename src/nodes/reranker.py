@@ -10,11 +10,12 @@ What this node does (plain English):
   5. Audits each explanation to check it cites real result content
   6. Writes reranked_results to state as RankedResult objects
 
-Cross-encoder: configurable via RERANKER_MODEL in .env (default: ms-marco-MiniLM-L-6-v2)
-  - Lightweight (~80MB), runs on CPU, no API key needed
+Cross-encoder: configurable via RERANKER_MODEL in .env
+  (default: BAAI/bge-reranker-v2-m3)
+  - Lightweight (~1.1GB), runs on CPU, no API key needed
   - Reads (query, result_text) pairs and outputs relevance logits
   - We apply sigmoid to convert logits to 0-1 confidence scores
-  - Downloaded from HuggingFace on first use (one-time ~80MB)
+  - Downloaded from Hugging Face on first use (one-time ~1.1GB)
 
 LLM explanations (PRD Section 4.6):
   - One batch GPT-4o-mini call for all results (token-efficient)
@@ -23,7 +24,8 @@ LLM explanations (PRD Section 4.6):
 
 Citation audit (PRD Section 4.6):
   - VERIFIED:   explanation references actual result content (title/description/genre)
-  - DEGRADED:   confidence < CONFIDENCE_THRESHOLD_DEGRADED (cross-encoder unsure)
+  - DEGRADED:   explanation doesn't cite result content AND cross-encoder confidence
+                 is below CONFIDENCE_THRESHOLD_DEGRADED
   - UNVERIFIED: explanation exists but doesn't reference result content
   - ABSENT:     no explanation generated (LLM failure or budget skip)
 
@@ -71,15 +73,19 @@ SYSTEM_PROMPT = PROMPT_PATH.read_text(encoding="utf-8")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  HELPER: Load cross-encoder (lazy — first call downloads ~80MB model)
+#  HELPER: Load cross-encoder (lazy — first call downloads one-time ~1.1GB model)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _get_cross_encoder():
     """Load the cross-encoder model on first use (lazy singleton).
 
-    The model is downloaded from HuggingFace on first invocation (~80MB).
+    The model is downloaded from Hugging Face on first invocation (one-time ~1.1GB).
     Subsequent calls return the cached instance. If RERANKER_MODEL changes
     in .env, a restart is needed (lru_cache on settings).
+
+    If the network call fails (e.g. SSL errors), retries with
+    ``local_files_only=True`` so a previously-cached model still works
+    without affecting the global HF_HUB_OFFLINE setting.
     """
     global _cross_encoder_instance, _cross_encoder_model_name
     model_name = settings.reranker_model
@@ -87,7 +93,20 @@ def _get_cross_encoder():
         from sentence_transformers import CrossEncoder
 
         logger.info("loading_cross_encoder", extra={"model": model_name})
-        _cross_encoder_instance = CrossEncoder(model_name)
+        try:
+            _cross_encoder_instance = CrossEncoder(model_name)
+        except Exception as exc:
+            exc_str = str(exc)
+            if "SSL" in exc_str or "MaxRetry" in exc_str or "ConnectionError" in exc_str:
+                logger.warning(
+                    "cross_encoder_network_error_retrying_offline",
+                    extra={"error": str(exc)[:200]},
+                )
+                _cross_encoder_instance = CrossEncoder(
+                    model_name, local_files_only=True,
+                )
+            else:
+                raise
         _cross_encoder_model_name = model_name
         logger.info("cross_encoder_loaded", extra={"model": model_name})
     return _cross_encoder_instance
@@ -121,8 +140,19 @@ def _score_with_cross_encoder(
     pairs = []
     for result in results:
         title = result.get("title", "")
-        description = result.get("source_fields", {}).get("description", "")
-        text = f"{title}. {description}" if description else title
+        source = result.get("source_fields", {})
+        description = source.get("description", "")
+        category = source.get("category", "")
+        genres = source.get("genres_all", "")
+
+        parts = [title]
+        if category:
+            parts.append(f"Category: {category}")
+        if genres:
+            parts.append(f"Genres: {genres}")
+        if description:
+            parts.append(description)
+        text = ". ".join(parts)
         pairs.append((query, text))
 
     raw_scores = model.predict(pairs)
@@ -244,10 +274,10 @@ def _audit_citation(
     """Check if the explanation references actual content from the result.
 
     Logic (applied in order):
-      1. No explanation text           → ABSENT
-      2. Confidence < degraded threshold → DEGRADED
-      3. Explanation cites title/description/genre → VERIFIED
-      4. Otherwise                      → UNVERIFIED
+      1. No explanation text                        → ABSENT
+      2. Explanation cites title/description/genre   → VERIFIED
+      3. Confidence < degraded threshold (uncited)   → DEGRADED
+      4. Otherwise                                   → UNVERIFIED
 
     Args:
         explanation: The LLM-generated explanation text.
@@ -259,9 +289,6 @@ def _audit_citation(
     """
     if not explanation:
         return ExplanationStatus.ABSENT, []
-
-    if confidence < settings.confidence_threshold_degraded:
-        return ExplanationStatus.DEGRADED, [str(result.get("id", ""))]
 
     result_id = str(result.get("id", ""))
     title = result.get("title", "").lower()
@@ -298,6 +325,10 @@ def _audit_citation(
 
     if cited:
         return ExplanationStatus.VERIFIED, [result_id]
+
+    if confidence < settings.confidence_threshold_degraded:
+        return ExplanationStatus.DEGRADED, [result_id]
+
     return ExplanationStatus.UNVERIFIED, []
 
 
@@ -477,6 +508,7 @@ def reranker_node(state: dict) -> dict:
 
         ranked = RankedResult(
             id=result_id,
+            title=str(result.get("title", "")),
             original_rank=rc["original_rank"],
             new_rank=rc["new_rank"],
             relevance_score=rc["relevance_score"],
@@ -494,9 +526,7 @@ def reranker_node(state: dict) -> dict:
     if reranked_results:
         confidences = [r["confidence"] for r in reranked_results]
         mean_conf = sum(confidences) / len(confidences)
-        low_conf_ratio = sum(1 for c in confidences if c < 0.5) / len(confidences)
         quality_scores["rerank_confidence"] = round(mean_conf, 4)
-        quality_scores["rerank_low_confidence_ratio"] = round(low_conf_ratio, 4)
     else:
         quality_scores["rerank_confidence"] = 0.0
         quality_scores["rerank_low_confidence_ratio"] = 1.0
@@ -519,7 +549,6 @@ def reranker_node(state: dict) -> dict:
             "verified_count": verified_count,
             "top_confidence": reranked_results[0]["confidence"] if reranked_results else 0.0,
             "mean_confidence": quality_scores.get("rerank_confidence", 0.0),
-            "low_confidence_ratio": quality_scores.get("rerank_low_confidence_ratio", 0.0),
         },
     )
     annotate_node_span(

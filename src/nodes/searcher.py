@@ -32,6 +32,76 @@ from src.utils.langwatch_tracker import annotate_node_span
 logger = get_logger(__name__)
 settings = get_settings()
 
+_STOP_WORDS = frozenset({
+    "the", "a", "an", "and", "or", "in", "of", "to", "for", "with", "is",
+    "on", "at", "by", "from", "this", "that", "it", "as", "are", "was",
+    "be", "has", "had", "not", "but", "all", "can", "her", "his", "one",
+    "our", "out", "you", "its", "my", "we", "do", "no", "so", "up", "if",
+    "me", "what", "about", "which", "when", "how", "who", "where", "why",
+    "movie", "movies", "film", "films", "show", "shows", "best", "top",
+    "good", "new", "old", "find", "get", "want", "like", "looking",
+})
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  HELPER: Keyword overlap check (semantic degradation detector)
+# ══════════════════════════════════════════════════════════════════════════════
+
+_OVERLAP_MIN_RATIO = 0.5
+_STEM_LEN = 5
+
+
+def _query_stems(query: str) -> set[str]:
+    """Extract query words and their root stems for fuzzy substring matching.
+
+    For each word, we emit both the full word and a short stem (first 5 chars).
+    The stem handles morphological variants: "pirates"→"pirat" matches "pirate",
+    "romantic"→"roman" matches "romance", "dramatic"→"drama" matches "drama".
+    """
+    stems: set[str] = set()
+    for w in query.split():
+        w = w.lower()
+        if len(w) < 3 or w in _STOP_WORDS:
+            continue
+        stems.add(w)
+        if len(w) > _STEM_LEN:
+            stems.add(w[:_STEM_LEN])
+    return stems
+
+
+def _has_keyword_overlap(query: str, hits: list[dict], top_n: int = 5) -> bool:
+    """Check whether enough of the top hits contain significant query keywords.
+
+    Returns True only when at least ``_OVERLAP_MIN_RATIO`` (50 %) of the top-N
+    results contain a query keyword (or its stem) in their title, description,
+    or genres.  Returns True when there are no significant keywords to check
+    (e.g. "best movies") since there is nothing to verify.
+
+    A single hit matching out of five (20 %) is NOT enough — that pattern
+    indicates the embedder placed one genuine result among garbage and the
+    keyword fallback should still fire.
+    """
+    stems = _query_stems(query)
+
+    if not stems:
+        return True
+
+    checked = hits[:top_n]
+    if not checked:
+        return False
+
+    matches = 0
+    for hit in checked:
+        title = (hit.get("title", "") or "").lower()
+        description = (hit.get("description", "") or "").lower()
+        genres = (hit.get("genres_all", "") or "").lower()
+        text = f"{title} {description} {genres}"
+
+        if any(stem in text for stem in stems):
+            matches += 1
+
+    return (matches / len(checked)) >= _OVERLAP_MIN_RATIO
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  HELPER: Build filter string for Meilisearch
@@ -185,7 +255,7 @@ def _build_freshness_report(results: list[SearchResult]) -> FreshnessReport:
             age_seconds = (now - r.freshness_timestamp).total_seconds()
 
             if age_seconds > settings.staleness_threshold_seconds:
-                stale_ids.append(r.id)
+                stale_ids.append({"id": r.id, "title": r.title})
 
             if age_seconds > max_staleness:
                 max_staleness = age_seconds
@@ -299,6 +369,52 @@ def searcher_node(state: dict) -> dict:
                     ),
                 ).model_dump()
             )
+
+        # ── Step 4b: Semantic degradation fallback ─────────────────────────
+        # When hybrid/semantic search returns results that share zero keywords
+        # with the query, the embedder is likely producing degenerate vectors.
+        # Fall back to keyword search so relevant results are not silently lost.
+        if (
+            strategy in ("HYBRID", "SEMANTIC")
+            and hits
+            and not _has_keyword_overlap(search_query, hits)
+        ):
+            logger.warning(
+                "searcher_semantic_degradation",
+                extra={
+                    "query_hash": query_hash,
+                    "strategy": strategy,
+                    "reason": "top results have no keyword overlap with query",
+                },
+            )
+
+            keyword_response = meili_search(
+                query=search_query,
+                strategy="KEYWORD",
+                filters=filter_string,
+                limit=20,
+            )
+            keyword_hits = keyword_response.get("hits", [])
+
+            if keyword_hits:
+                hits = keyword_hits
+                raw_response = keyword_response
+
+            errors = state.get("errors", [])
+            errors.append(
+                ExtractionError(
+                    node="searcher",
+                    severity=ErrorSeverity.WARNING,
+                    message="SEMANTIC_DEGRADATION_FALLBACK",
+                    fallback_applied=True,
+                    fallback_description=(
+                        f"{strategy} results had no keyword overlap with the "
+                        f"query. Fell back to keyword search — got "
+                        f"{len(keyword_hits)} results."
+                    ),
+                ).model_dump()
+            )
+            state["errors"] = errors
 
         # ── Step 5: Map hits to SearchResult objects ──────────────────────────
         search_results = _hits_to_search_results(hits)

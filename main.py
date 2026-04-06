@@ -181,8 +181,6 @@ def _print_summary(final_state: dict) -> None:
         print(f"    Combined (4-sig):    {q.get('combined', 'N/A')}")
         if "rerank_confidence" in q:
             print(f"    Rerank Confidence:   {q.get('rerank_confidence', 'N/A')}")
-            pct = q.get("rerank_low_confidence_ratio", 0.0)
-            print(f"    Low Conf (<0.5):     {pct:.0%} of results")
 
     # ── Section 5: Freshness ──────────────────────────────────────────────
     freshness = resp.get("freshness_report", final_state.get("freshness_metadata", {}))

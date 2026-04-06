@@ -1,6 +1,6 @@
 # AI-Powered Search Engine
 
-Hybrid search on **Meilisearch** (keyword + semantic) with **BGE** embeddings configured on the index.
+Hybrid search on **Meilisearch** (keyword + semantic) with **multilingual E5** embeddings (`intfloat/multilingual-e5-large` via `EMBEDDING_MODEL`) on the index, and a **BGE** cross-encoder reranker (`BAAI/bge-reranker-v2-m3` via `RERANKER_MODEL`) in the pipeline.
 
 ## Requirements
 
