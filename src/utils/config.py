@@ -48,6 +48,26 @@ class Settings:
     dataset_file: str
     dataset_schema: str
 
+    # ── Latency / performance ──────────────────────────────
+    # fast_mode skips LLM explanation generation in the reranker, reducing
+    # end-to-end latency by ~400-800 ms at the cost of "Why this matches" text.
+    # Use for latency-sensitive integrations; full AI path remains the default.
+    fast_mode: bool
+
+    # ── Kafka / Redpanda streaming ingest ─────────────────
+    # Set kafka_enabled=true to activate the Kafka consumer path.
+    # Compatible with any Kafka-API broker: Apache Kafka, Redpanda, Confluent Cloud.
+    # The FastAPI ingest endpoint (ingest_api.py) remains available alongside Kafka.
+    kafka_enabled: bool
+    kafka_bootstrap_servers: str   # e.g. localhost:9092 or seed.redpanda.cloud:9092
+    kafka_topic: str               # topic name, e.g. search-ingest
+    kafka_consumer_group: str      # consumer group id for offset tracking
+    kafka_security_protocol: str   # PLAINTEXT | SASL_SSL
+    kafka_sasl_mechanism: str      # PLAIN | SCRAM-SHA-256 | SCRAM-SHA-512 (for SASL_SSL)
+    kafka_sasl_username: str       # leave empty for PLAINTEXT
+    kafka_sasl_password: str       # leave empty for PLAINTEXT
+    kafka_max_poll_records: int    # max records per poll (default 10)
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
@@ -85,5 +105,17 @@ def get_settings() -> Settings:
         # ── Dataset ─────────────────────────────────────────────
         dataset_file=os.getenv("DATASET_FILE", "data/movies.json"),
         dataset_schema=os.getenv("DATASET_SCHEMA", "movies"),
+        # ── Latency / performance ─────────────────────────────────
+        fast_mode=os.getenv("FAST_MODE", "false").lower() == "true",
+        # ── Kafka / Redpanda streaming ingest ─────────────────────
+        kafka_enabled=os.getenv("KAFKA_ENABLED", "false").lower() == "true",
+        kafka_bootstrap_servers=os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092"),
+        kafka_topic=os.getenv("KAFKA_TOPIC", "search-ingest"),
+        kafka_consumer_group=os.getenv("KAFKA_CONSUMER_GROUP", "search-engine-consumer"),
+        kafka_security_protocol=os.getenv("KAFKA_SECURITY_PROTOCOL", "PLAINTEXT"),
+        kafka_sasl_mechanism=os.getenv("KAFKA_SASL_MECHANISM", "PLAIN"),
+        kafka_sasl_username=os.getenv("KAFKA_SASL_USERNAME", ""),
+        kafka_sasl_password=os.getenv("KAFKA_SASL_PASSWORD", ""),
+        kafka_max_poll_records=int(os.getenv("KAFKA_MAX_POLL_RECORDS", "10")),
     )
     

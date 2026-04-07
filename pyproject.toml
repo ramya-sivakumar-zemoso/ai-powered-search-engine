@@ -49,6 +49,12 @@ dev = [
 ui = [
     "streamlit>=1.28.0,<2",
 ]
+# Real-time ingest: HTTP API + Kafka consumer/producer (not required for batch setup_index or tests).
+streaming = [
+    "confluent-kafka>=2.3.0",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]

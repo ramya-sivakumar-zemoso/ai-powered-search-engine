@@ -221,6 +221,7 @@ def run_search_with_trace(
         node added or changed compared to the state before it ran (not the full state).
     """
     sid = session_id or str(uuid.uuid4())
+    t_start = time.time()
     logger.info(
         "search_started",
         extra={"query": query, "session_id": sid},
@@ -247,6 +248,16 @@ def run_search_with_trace(
     if final_state is None:
         final_state = {}
 
+    pipeline_latency_ms = round((time.time() - t_start) * 1000, 1)
+    final_state["pipeline_latency_ms"] = pipeline_latency_ms
+
+    # Surface latency in the final_response so callers can assert SLAs.
+    if isinstance(final_state.get("final_response"), dict):
+        final_state["final_response"]["pipeline_latency_ms"] = pipeline_latency_ms
+        meta = final_state["final_response"].get("pipeline_metadata")
+        if isinstance(meta, dict):
+            meta["pipeline_latency_ms"] = pipeline_latency_ms
+
     logger.info(
         "search_completed",
         extra={
@@ -254,6 +265,7 @@ def run_search_with_trace(
             "session_id": final_state.get("session_id", sid),
             "result_count": len(final_state.get("search_results", [])),
             "iteration_count": final_state.get("iteration_count", 0),
+            "pipeline_latency_ms": pipeline_latency_ms,
         },
     )
 

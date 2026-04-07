@@ -74,6 +74,86 @@ evaluator_signal_weights = {
 
 Override in `schema_registry.py` per domain (marketplace, sports, movies, …).
 
+## Kafka streaming ingest (recommended for live data)
+
+The primary real-time path uses **Kafka / Redpanda** as a durable event buffer. The consumer commits Kafka offsets only after Meilisearch confirms the document is indexed — guaranteeing at-least-once delivery end-to-end.
+
+### Quick start (local — Redpanda in Docker)
+
+```bash
+# 1. Start Redpanda (Kafka-compatible, zero config)
+docker run -d -p 9092:9092 --name redpanda \
+  redpandadata/redpanda:latest redpanda start \
+  --overprovisioned --smp 1 --memory 1G --reserve-memory 0M \
+  --node-id 0 --check=false --kafka-addr 0.0.0.0:9092
+
+# 2. Install the Kafka client
+pip install confluent-kafka
+
+# 3. Start the consumer (terminal 1)
+KAFKA_ENABLED=true python -m src.tools.kafka_consumer
+
+# 4. Publish a listing event (terminal 2)
+KAFKA_ENABLED=true python -m src.tools.kafka_producer \
+  --schema marketplace '{"id": "1", "title": "Widget X", "category": "Electronics"}'
+```
+
+### Managed broker (Redpanda Serverless / Confluent Cloud)
+
+```bash
+KAFKA_ENABLED=true \
+KAFKA_BOOTSTRAP_SERVERS=seed.redpanda.cloud:9092 \
+KAFKA_SECURITY_PROTOCOL=SASL_SSL \
+KAFKA_SASL_USERNAME=your-username \
+KAFKA_SASL_PASSWORD=your-password \
+python -m src.tools.kafka_consumer
+```
+
+### Publish from Python
+
+```python
+from src.tools.kafka_producer import SearchIngestProducer
+
+with SearchIngestProducer() as producer:
+    producer.publish({"id": "123", "title": "Air Max 90", "category": "Shoes"}, schema_name="marketplace")
+    producer.publish_tombstone("123")   # soft-delete
+```
+
+**Key design choices:**
+- Partition key = document `id` → all updates for the same listing hit the same partition (ordered)
+- `schema_name` header routes each message to the correct `DatasetSchema` — one topic serves all domains
+- Offset committed **after** Meilisearch ACK — safe replay if Meilisearch is temporarily down
+
+## Real-time ingest (5-minute SLA)
+
+The batch `setup_index.py` path is for initial data load. For live listings use the **ingest API**:
+
+```bash
+pip install fastapi uvicorn
+uvicorn src.tools.ingest_api:app --host 0.0.0.0 --port 8001
+```
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /ingest/document` | Upsert a single document; blocks until Meilisearch indexes it (HTTP 408 on SLA breach) |
+| `POST /ingest/batch` | Upsert up to 100 documents in one call |
+| `DELETE /ingest/{id}` | Hard-delete a document |
+| `GET /ingest/health` | Readiness probe + SLA config |
+
+Every response includes `elapsed_seconds` and `sla_ok` for monitoring. The endpoint is idempotent — re-posting the same `id` performs an in-place update (safe for at-least-once streams).
+
+**Soft-delete (tombstone):** include `deleted_at` in the payload and filter `deleted_at IS NULL` at query time.
+
+## Latency modes
+
+| Mode | End-to-end P95 | Trade-off |
+|---|---|---|
+| Default (`FAST_MODE=false`) | ~2 700 ms | Full AI quality with LLM explanations |
+| Fast mode (`FAST_MODE=true`) | ~1 100 ms | Skips LLM explanations; cross-encoder ranking still runs |
+| Meilisearch-only | ~80 ms | No AI enrichment; raw keyword/hybrid results |
+
+Every response includes `pipeline_latency_ms` for SLA tracking. See `DESIGN.md §13.1` for the full latency breakdown.
+
 ## Graph diagram
 
 Export a Mermaid + SVG diagram of the pipeline topology:
