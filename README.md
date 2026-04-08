@@ -8,7 +8,7 @@ The codebase is **domain-agnostic**: movies, e-commerce, sports (and others) are
 
 ## Requirements
 
-- Python 3.12+
+- Python 3.10+ (see `pyproject.toml`; 3.12+ recommended)
 - Meilisearch (see `.env.example` for `MEILI_*` vars)
 
 ## Setup
@@ -39,8 +39,11 @@ Optional env defaults: `DATASET_FILE`, `DATASET_SCHEMA` (see `.env.example`).
 
 ## Verify
 
+After indexing, run a pipeline query (needs `OPENAI_API_KEY` for LLM nodes):
+
 ```bash
-python scripts/verify_search.py --schema movies
+python main.py --query "science fiction adventure"
+# or: streamlit run streamlit_app.py
 ```
 
 ## Response flags
