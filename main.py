@@ -1,7 +1,7 @@
 """
 AI Search pipeline — main entry point.
 
-What this file does (plain English):
+What this file does:
   This is the file you run to start a search.
   It sets up LangWatch observability, then sends a test query
   through the full 6-node pipeline. Demo strings come from the active

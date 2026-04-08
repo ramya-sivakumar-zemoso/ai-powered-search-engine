@@ -1,7 +1,7 @@
 """
 Evaluator node — scores search result quality and decides accept / retry / exhausted.
 
-What this node does (plain English):
+What this node does:
   1. Takes the search_results from the searcher node
   2. Scores them on 4 signals:
      - semantic_relevance  (30%) — are results meaningfully relevant?

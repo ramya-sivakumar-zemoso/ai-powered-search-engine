@@ -121,7 +121,7 @@ class DatasetSchema(BaseModel):
     )
     rerank_field_labels: dict[str, str] = Field(
         default_factory=dict,
-        description="Optional pretty labels for auxiliary fields in cross-encoder text.",
+        description="Optional display labels for auxiliary fields in cross-encoder text.",
     )
     citation_tag_fields: list[str] = Field(
         default_factory=list,
