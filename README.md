@@ -37,21 +37,6 @@ python -m src.tools.setup_index --file data/movies.json --schema movies --limit 
 
 Optional env defaults: `DATASET_FILE`, `DATASET_SCHEMA` (see `.env.example`).
 
-### Collaborators: working on the EmbeddingGemma index
-
-Use branch **`feat/embedding-gemma`** (tracks the EmbeddingGemma rollout) or **`main`** once merged.
-
-1. `git fetch origin && git checkout feat/embedding-gemma && git pull`
-2. Copy `.env.example` → `.env`; set **`EMBEDDING_MODEL=google/embeddinggemma-300m`** and **`EMBEDDING_DIMENSIONS=768`** (defaults in repo).
-3. Start Meilisearch; align **`MEILI_MASTER_KEY`** / **`MEILI_URL`** with your instance.
-4. **Re-index** after pulling (vectors are not compatible with the old multilingual-E5 index):
-
-   ```bash
-   python -m src.tools.setup_index --schema movies
-   ```
-
-5. First run downloads ~300 MB HF weights inside Meilisearch; allow time for CPU/GPU.
-
 ## Verify
 
 After indexing, run a pipeline query (needs `OPENAI_API_KEY` for LLM nodes):

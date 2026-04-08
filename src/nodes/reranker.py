@@ -1,7 +1,7 @@
 """
 Reranker node — cross-encoder re-ranking + LLM explanations with citation audit.
 
-What this node does (plain English):
+What this node does:
   1. Takes the accepted search_results from the evaluator
   2. Scores each result against the query using a cross-encoder model
      (a small neural network that reads query + result together)
