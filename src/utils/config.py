@@ -81,8 +81,8 @@ def get_settings() -> Settings:
         openai_api_key=os.getenv("OPENAI_API_KEY", ""),
         openai_model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
         # ── Embeddings ───────────────────────────────────────
-        embedding_model=os.getenv("EMBEDDING_MODEL", "intfloat/multilingual-e5-large"),
-        embedding_dimensions=int(os.getenv("EMBEDDING_DIMENSIONS", "1024")),
+        embedding_model=os.getenv("EMBEDDING_MODEL", "google/embeddinggemma-300m"),
+        embedding_dimensions=int(os.getenv("EMBEDDING_DIMENSIONS", "768")),
         # ── LangWatch ───────────────────────────────────────
         langwatch_enabled=os.getenv("LANGWATCH_ENABLED", "false").lower() == "true",
         langwatch_api_key=os.getenv("LANGWATCH_API_KEY", ""),
