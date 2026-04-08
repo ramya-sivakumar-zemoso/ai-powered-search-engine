@@ -29,7 +29,6 @@ import argparse
 import json
 import sys
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 from src.utils.config import get_settings
@@ -233,13 +232,16 @@ def _cli() -> None:
     try:
         doc = json.loads(args.document)
     except json.JSONDecodeError as exc:
-        print(f"Error: invalid JSON — {exc}", file=sys.stderr)
+        logger.error("kafka_producer_invalid_json", extra={"error": str(exc)})
         sys.exit(1)
 
     with SearchIngestProducer() as producer:
         producer.publish(doc, schema_name=args.schema)
         producer.flush()
-        print(f"Published document id={doc.get('id')} to topic={settings.kafka_topic}")
+        logger.info(
+            "kafka_document_published",
+            extra={"document_id": doc.get("id"), "topic": settings.kafka_topic},
+        )
 
 
 if __name__ == "__main__":

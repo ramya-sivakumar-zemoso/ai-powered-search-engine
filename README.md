@@ -6,6 +6,8 @@ The codebase is **domain-agnostic**: movies, e-commerce, sports (and others) are
 
 **Architecture, PRD mapping, and trade-offs:** see **[DESIGN.md](DESIGN.md)**. **Trace correlation:** pass `--session-id` to `main.py` or use Streamlit (session id in app state); responses include `session_id` and `query_hash`.
 
+**Prompt-injection defenses** (query sanitisation, delimiter boundaries for user vs vendor text in human messages only, structured detection logs) are described in **[DESIGN.md §7](DESIGN.md#7-prompt-injection-prd-47)**.
+
 ## Requirements
 
 - Python 3.10+ (see `pyproject.toml`; 3.12+ recommended)

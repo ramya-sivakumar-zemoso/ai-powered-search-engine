@@ -299,9 +299,31 @@ def get_index_stats(index_name: str | None = None) -> dict[str, Any]:
         return {"number_of_documents": 0, "is_indexing": False, "unavailable": True}
 
 
+def drop_index(index_name: str | None = None) -> bool:
+    """Delete an index. Returns True if a delete task ran, False if the index was already absent."""
+    idx = index_name or settings.meili_index_name
+    client = _get_client()
+    try:
+        task_info = client.delete_index(idx)
+        wait_for_task(task_info.task_uid, interval=2)
+        return True
+    except Exception as exc:
+        low = str(exc).lower()
+        if "not found" in low or "index_not_found" in low:
+            return False
+        raise
+
+
+def _task_to_dict(task: Any) -> dict[str, Any]:
+    """Convert a Meilisearch Task object (or dict) to a plain dict."""
+    if isinstance(task, dict):
+        return task
+    return {k: v for k, v in vars(task).items() if not k.startswith("_")}
+
+
 def check_task(task_uid: int) -> dict[str, Any]:
     """Get the status of a Meilisearch task by UID."""
-    return _get_client().get_task(task_uid)
+    return _task_to_dict(_get_client().get_task(task_uid))
 
 
 def wait_for_task(
@@ -313,23 +335,25 @@ def wait_for_task(
     elapsed = 0
     while elapsed < timeout:
         task = check_task(task_uid)
-        status = task["status"]
-        print(f"  [task {task_uid}] {status}  ({elapsed}s elapsed)")
+        status = task.get("status", "unknown")
+        logger.info(
+            "meili_task_status",
+            extra={"task_uid": task_uid, "status": status, "elapsed_seconds": elapsed},
+        )
         if status == "succeeded":
             return task
         if status == "failed":
-            error = task.get("error", {}).get("message", "unknown error")
-            raise RuntimeError(f"Task {task_uid} failed: {error}")
+            err = task.get("error") or {}
+            msg = err.get("message", "unknown error") if isinstance(err, dict) else str(err)
+            raise RuntimeError(f"Task {task_uid} failed: {msg}")
         time.sleep(interval)
         elapsed += interval
     raise TimeoutError(f"Task {task_uid} timed out after {timeout}s")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Real-time / streaming ingest (PRD: 5-minute ingest SLA)
+#  Real-time / streaming ingest (PRD: ingest SLA — default from INGEST_SLA_SECONDS)
 # ══════════════════════════════════════════════════════════════════════════════
-
-_INGEST_SLA_SECONDS = 300  # 5 minutes
 
 
 def upsert_documents(
@@ -337,7 +361,7 @@ def upsert_documents(
     index_name: str | None = None,
     *,
     wait: bool = True,
-    sla_seconds: int = _INGEST_SLA_SECONDS,
+    sla_seconds: int | None = None,
 ) -> dict[str, Any]:
     """Add or update documents in Meilisearch and optionally block until indexed.
 
@@ -355,7 +379,7 @@ def upsert_documents(
         wait:        If True (default), poll until the indexing task succeeds or
                      the SLA expires.  Pass ``wait=False`` for fire-and-forget.
         sla_seconds: Max seconds to wait before raising ``TimeoutError``.
-                     Default is 300 s (PRD 5-minute SLA).
+                     Default: ``INGEST_SLA_SECONDS`` from settings (env, typically 300).
 
     Returns:
         dict with ``task_uid``, ``status``, ``elapsed_seconds``, and
@@ -366,6 +390,7 @@ def upsert_documents(
         TimeoutError:  Task did not complete within ``sla_seconds``.
     """
     idx = index_name or settings.meili_index_name
+    sla = sla_seconds if sla_seconds is not None else settings.ingest_sla_seconds
     if not documents:
         return {"task_uid": None, "status": "noop", "elapsed_seconds": 0.0, "document_count": 0}
 
@@ -393,11 +418,11 @@ def upsert_documents(
     # Poll until succeeded / failed — with SLA guard.
     elapsed = 0.0
     interval = 1  # start at 1 s, cap at 10 s
-    while elapsed < sla_seconds:
+    while elapsed < sla:
         time.sleep(interval)
         elapsed = time.monotonic() - t0
         try:
-            task = _get_client().get_task(task_uid)
+            task = _task_to_dict(_get_client().get_task(task_uid))
         except Exception as exc:
             logger.warning("task_poll_error", extra={"task_uid": task_uid, "error": str(exc)})
             interval = min(interval * 2, 10)
@@ -412,7 +437,7 @@ def upsert_documents(
                     "task_uid": task_uid,
                     "elapsed_seconds": elapsed_final,
                     "count": len(documents),
-                    "sla_ok": elapsed_final <= sla_seconds,
+                    "sla_ok": elapsed_final <= sla,
                 },
             )
             return {
@@ -422,13 +447,14 @@ def upsert_documents(
                 "document_count": len(documents),
             }
         if status == "failed":
-            error_msg = task.get("error", {}).get("message", "unknown error")
+            err = task.get("error") or {}
+            error_msg = err.get("message", "unknown error") if isinstance(err, dict) else str(err)
             raise RuntimeError(f"Meilisearch indexing task {task_uid} failed: {error_msg}")
         interval = min(interval * 2, 10)
 
     raise TimeoutError(
-        f"Meilisearch indexing task {task_uid} did not complete within {sla_seconds}s "
-        f"(PRD 5-minute ingest SLA exceeded)."
+        f"Meilisearch indexing task {task_uid} did not complete within {sla}s "
+        f"(ingest SLA exceeded; see INGEST_SLA_SECONDS)."
     )
 
 

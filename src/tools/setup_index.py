@@ -1,31 +1,33 @@
-"""Create index, set attributes + HuggingFace embedder, batch documents, wait for embeddings.
+"""Create index, set attributes + embedder (HuggingFace, OpenAI, Gemini, or self-hosted), batch documents.
 
 Uses the official ``meilisearch`` Python SDK for all API calls.
+
+Run from the repository root: ``python -m src.tools.setup_index`` (optional ``--file``, ``--schema``, ``--limit``, ``--reset``).
+
+- Gemini: ``EMBEDDER_SOURCE=gemini`` + ``GEMINI_API_KEY`` (Meilisearch ``rest`` → batchEmbedContents).
+- Self-hosted: ``EMBEDDER_SOURCE=self_hosted`` + ``EMBEDDING_SERVER_URL`` (OpenAI-compatible server, e.g. HuggingFace TEI).
 """
 from __future__ import annotations
 
 import argparse
 import os
 import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-
-from dotenv import load_dotenv
-
-load_dotenv()
 
 from src.models.schema_registry import get_schema
 from src.tools.dataset_loader import load_and_normalise
 from src.tools.meilisearch_client import (
     _get_client,
+    drop_index,
     get_index_stats,
     health,
     wait_for_task,
 )
 from src.utils.config import get_settings
+from src.utils.gemini_meili_embedder import build_gemini_batch_rest_embedder
 
 settings = get_settings()
+
+DOCUMENT_BATCH_SIZE = 500
 
 
 def create_index(index_name: str) -> dict:
@@ -59,33 +61,105 @@ def configure_attributes(index_name: str, schema) -> None:
 
 
 def configure_embedder(index_name: str, schema) -> dict:
-    """Configure the HuggingFace embedder on the index."""
+    """Configure the Meilisearch embedder (HF local, OpenAI, or Gemini REST)."""
     index = _get_client().index(index_name)
-    embedder_config = {
-        settings.meili_embedder_name: {
-            "source": "huggingFace",
-            "model": settings.embedding_model,
-            "dimensions": settings.embedding_dimensions,
-            "documentTemplate": schema.embedder_template,
+    src = settings.embedder_source
+
+    if src == "vertex":
+        print(
+            "  ERROR: EMBEDDER_SOURCE=vertex is no longer supported. "
+            "Use local (HuggingFace), openai, or gemini."
+        )
+        sys.exit(1)
+
+    if src == "openai":
+        if not settings.openai_api_key:
+            print("  ERROR: EMBEDDER_SOURCE=openai but OPENAI_API_KEY is empty.")
+            sys.exit(1)
+        embedder_config = {
+            settings.meili_embedder_name: {
+                "source": "openAi",
+                "apiKey": settings.openai_api_key,
+                "model": settings.embedding_model,
+                "dimensions": settings.embedding_dimensions,
+                "documentTemplate": schema.embedder_template,
+            }
         }
-    }
+        print("  Source: OpenAI Embeddings API")
+    elif src == "gemini":
+        if not settings.gemini_api_key:
+            print(
+                "  ERROR: EMBEDDER_SOURCE=gemini but GEMINI_API_KEY (or GOOGLE_API_KEY) is empty."
+            )
+            sys.exit(1)
+        d = settings.embedding_dimensions
+        cap = settings.gemini_embedding_max_output_dimension
+        if d < 1 or d > cap:
+            print(
+                f"  ERROR: For Gemini embedder, EMBEDDING_DIMENSIONS must be 1..{cap} (got {d}). "
+                "Raise GEMINI_EMBEDDING_MAX_OUTPUT_DIMENSION if Google raises the model limit."
+            )
+            sys.exit(1)
+        task = settings.gemini_embedding_task_type or None
+        embedder_config = build_gemini_batch_rest_embedder(
+            embedder_name=settings.meili_embedder_name,
+            api_key=settings.gemini_api_key,
+            dimensions=d,
+            document_template=schema.embedder_template,
+            model_id=settings.embedding_model,
+            task_type=task,
+        )
+        print("  Source: Gemini API (batchEmbedContents, x-goog-api-key)")
+    elif src == "self_hosted":
+        url = f"{settings.embedding_server_url}/v1/embeddings"
+        embedder_config = {
+            settings.meili_embedder_name: {
+                "source": "rest",
+                "apiKey": None,
+                "url": url,
+                "dimensions": settings.embedding_dimensions,
+                "documentTemplate": schema.embedder_template,
+                "request": {
+                    "input": ["{{text}}", "{{..}}"],
+                    "model": settings.embedding_model,
+                },
+                "response": {
+                    "data": [
+                        {"embedding": "{{embedding}}"},
+                        "{{..}}",
+                    ]
+                },
+            }
+        }
+        print(f"  Source: Self-hosted ({settings.embedding_server_url})")
+    else:
+        embedder_config = {
+            settings.meili_embedder_name: {
+                "source": "huggingFace",
+                "model": settings.embedding_model,
+                "documentTemplate": schema.embedder_template,
+            }
+        }
+        print("  Source: local HuggingFace (downloaded on first use)")
+
     task_info = index.update_embedders(embedder_config)
     print(f"  Embedder '{settings.meili_embedder_name}' configured.")
+    print(f"  Model: {settings.embedding_model}")
+    print(f"  Dimensions: {settings.embedding_dimensions}")
     print(f"  Template: {schema.embedder_template}")
     return {"taskUid": task_info.task_uid}
 
 
 def add_documents(index_name: str, documents: list[dict]) -> None:
-    """Add documents in batches of 500."""
+    """Add documents in fixed-size batches."""
     index = _get_client().index(index_name)
-    batch_size = 500
     total = len(documents)
-    for i in range(0, total, batch_size):
-        batch = documents[i : i + batch_size]
+    for i in range(0, total, DOCUMENT_BATCH_SIZE):
+        batch = documents[i : i + DOCUMENT_BATCH_SIZE]
         task_info = index.add_documents(batch)
         task_uid = task_info.task_uid
-        batch_num = i // batch_size + 1
-        total_batches = (total + batch_size - 1) // batch_size
+        batch_num = i // DOCUMENT_BATCH_SIZE + 1
+        total_batches = (total + DOCUMENT_BATCH_SIZE - 1) // DOCUMENT_BATCH_SIZE
         print(f"  Batch {batch_num}/{total_batches} → task {task_uid}")
         wait_for_task(task_uid, interval=3)
 
@@ -96,7 +170,6 @@ def setup(
     limit: int | None = None,
     reset: bool = False,
 ) -> None:
-    _ = reset
     index_name = settings.meili_index_name
 
     print("\n── Checking Meilisearch ──────────────────────────────────────")
@@ -107,6 +180,13 @@ def setup(
         print(f"\n Cannot reach Meilisearch at {settings.meili_url}")
         print(f"    Error: {exc}")
         sys.exit(1)
+
+    if reset:
+        print(f"\n── Reset: drop index '{index_name}' if present ─────────────")
+        dropped = drop_index(index_name)
+        print(
+            f"  {'Dropped' if dropped else 'No existing'} index '{index_name}'."
+        )
 
     print(f"\n── Creating index '{index_name}' ──────────────────────────────")
     create_index(index_name)
@@ -128,8 +208,15 @@ def setup(
     add_documents(index_name, documents)
 
     print("\n── Waiting for embedding generation ─────────────────────────")
-    print("  Embedding model will be downloaded on first run.")
-    print("  This can take 5–30 minutes depending on connection and CPU.")
+    if settings.embedder_source == "openai":
+        print("  OpenAI is embedding documents (API calls; no local model download).")
+    elif settings.embedder_source == "gemini":
+        print("  Gemini API is embedding documents (remote; rate limits apply).")
+    elif settings.embedder_source == "self_hosted":
+        print(f"  Self-hosted server at {settings.embedding_server_url} is embedding documents.")
+    else:
+        print("  Embedding model will be downloaded on first run.")
+        print("  This can take 5–30 minutes depending on connection and CPU.")
     wait_for_task(embedder_task["taskUid"], interval=10, timeout=3600)
 
     print("\n── Done ──────────────────────────────────────────────────────")

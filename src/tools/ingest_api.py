@@ -1,4 +1,4 @@
-"""Real-time ingest API — per-listing event-driven path (PRD: 5-minute ingest SLA).
+"""Real-time ingest API — per-listing event-driven path (ingest SLA: ``INGEST_SLA_SECONDS``).
 
 Run:
     uvicorn src.tools.ingest_api:app --host 0.0.0.0 --port 8001
@@ -19,7 +19,7 @@ Design notes
   for streaming deletions with eventual visibility guarantees.
 - SLA tracking: every response includes ``elapsed_seconds`` so callers and
   monitoring can assert that indexing (including embedder task completion) stays
-  within the 5-minute contract.
+  within the contract (``INGEST_SLA_SECONDS``, default 300s).
 - Streaming integration: this endpoint is the application-side webhook receiver for
   any upstream event bus (Kafka consumer, CDC hook, queue worker).  The caller is
   responsible for normalising the raw event into the ``IngestDocument`` schema before
@@ -40,6 +40,7 @@ from src.tools.meilisearch_client import (
     upsert_documents,
 )
 from src.utils.config import get_settings
+from src.utils.ingest_sla_contract import sla_contract_payload
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -48,14 +49,13 @@ settings = get_settings()
 app = FastAPI(
     title="AI Search — Real-time Ingest API",
     description=(
-        "Event-driven per-listing ingest endpoint. "
-        "Guarantees Meilisearch visibility within 5 minutes of document receipt."
+        "Event-driven per-listing ingest. "
+        "SLA: see GET /ingest/health → sla_contract (default wait ceiling INGEST_SLA_SECONDS=300)."
     ),
     version="1.0.0",
 )
 
 _BATCH_LIMIT = 100
-_SLA_SECONDS = 300
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -151,13 +151,14 @@ def ingest_health() -> dict[str, Any]:
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=f"Meilisearch unreachable: {exc}",
         ) from exc
+    extra = sla_contract_payload(settings)
     return {
         "status": "ok",
         "meilisearch": meili_status,
-        "sla_seconds": _SLA_SECONDS,
         "batch_limit": _BATCH_LIMIT,
         "active_index": settings.meili_index_name,
         "active_schema": settings.dataset_schema,
+        **extra,
     }
 
 
@@ -166,7 +167,7 @@ def ingest_document(doc: IngestDocument) -> IngestResponse:
     """Upsert a single document and block until Meilisearch has indexed it.
 
     - Idempotent: re-posting the same ``id`` performs an in-place update.
-    - Raises 408 if indexing does not complete within 5 minutes (SLA breach).
+    - Raises 408 if indexing does not complete within ``INGEST_SLA_SECONDS`` (SLA breach).
     - Raises 502 if Meilisearch rejects the request.
     """
     idx = settings.meili_index_name
@@ -175,7 +176,9 @@ def ingest_document(doc: IngestDocument) -> IngestResponse:
 
     t0 = time.monotonic()
     try:
-        result = upsert_documents([meili_doc], index_name=idx, wait=True, sla_seconds=_SLA_SECONDS)
+        result = upsert_documents(
+            [meili_doc], index_name=idx, wait=True, sla_seconds=settings.ingest_sla_seconds,
+        )
     except TimeoutError as exc:
         logger.error("ingest_sla_breach", extra={"id": doc.id, "elapsed": time.monotonic() - t0})
         raise HTTPException(
@@ -194,7 +197,7 @@ def ingest_document(doc: IngestDocument) -> IngestResponse:
         status=result["status"],
         elapsed_seconds=elapsed,
         document_count=1,
-        sla_ok=elapsed <= _SLA_SECONDS,
+        sla_ok=elapsed <= settings.ingest_sla_seconds,
         index=idx,
     )
 
@@ -214,8 +217,14 @@ def ingest_batch(request: IngestBatchRequest) -> IngestResponse:
 
     t0 = time.monotonic()
     try:
-        result = upsert_documents(meili_docs, index_name=idx, wait=True, sla_seconds=_SLA_SECONDS)
+        result = upsert_documents(
+            meili_docs, index_name=idx, wait=True, sla_seconds=settings.ingest_sla_seconds,
+        )
     except TimeoutError as exc:
+        logger.error(
+            "ingest_batch_sla_breach",
+            extra={"count": count, "elapsed": time.monotonic() - t0},
+        )
         raise HTTPException(
             status_code=status.HTTP_408_REQUEST_TIMEOUT,
             detail=str(exc),
@@ -232,7 +241,7 @@ def ingest_batch(request: IngestBatchRequest) -> IngestResponse:
         status=result["status"],
         elapsed_seconds=elapsed,
         document_count=count,
-        sla_ok=elapsed <= _SLA_SECONDS,
+        sla_ok=elapsed <= settings.ingest_sla_seconds,
         index=idx,
     )
 

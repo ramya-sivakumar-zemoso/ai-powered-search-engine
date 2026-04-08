@@ -309,23 +309,14 @@ def _compute_quality_score(state: dict) -> dict[str, Any]:
 
 def _is_near_duplicate_variant(
     current_variant: str,
+    current_strategy: str,
     search_history: list[dict],
 ) -> bool:
-    """Check if the current query variant is a near-duplicate of a previous one.
+    """True if the same retrieval strategy was already used with a near-identical variant.
 
-    Uses token-level Jaccard similarity: ``|intersection| / |union|``.
-    No model needed — fast set arithmetic on lowercased word tokens.
-
-    If Jaccard >= ``near_duplicate_threshold`` (default 0.92 from config),
-    the variant is considered a near-duplicate and retrying would produce
-    the same results.
-
-    Args:
-        current_variant: The query variant for the current attempt.
-        search_history: List of previous SearchAttempt dicts.
-
-    Returns:
-        True if a near-duplicate variant exists in history.
+    Only compares against history entries whose ``strategy`` matches
+    ``current_strategy`` (PRD: same strategy + similar query variant must not
+    be retried). Uses token-level Jaccard similarity on the variant strings.
     """
     current_tokens = set(current_variant.lower().split())
     if not current_tokens:
@@ -335,6 +326,8 @@ def _is_near_duplicate_variant(
 
     for attempt in search_history:
         if not isinstance(attempt, dict):
+            continue
+        if attempt.get("strategy", "") != current_strategy:
             continue
         prev_variant = attempt.get("query_variant", "")
         prev_tokens = set(prev_variant.lower().split())
@@ -443,9 +436,12 @@ def evaluator_node(state: dict) -> dict:
     Decision rules:
       - quality_score >= 0.65           → "accept"  (results are good enough)
       - quality_score < 0.65 AND
-        iteration < MAX_SEARCH_ITERATIONS AND
-        budget not exceeded             → "retry"   (try a different strategy)
+        retries_so_far < MAX_SEARCH_ITERATIONS AND
+        budget not exceeded             → "retry"   (evaluator-triggered retry)
       - Otherwise                       → "exhausted" (send best results forward)
+
+    ``MAX_SEARCH_ITERATIONS`` is the maximum number of **evaluator-triggered
+    retries** (not including the first search round).
 
     Args:
         state: The pipeline state dict.
@@ -473,7 +469,8 @@ def evaluator_node(state: dict) -> dict:
     results = state.get("search_results", [])
     strategy = state.get("retrieval_strategy", "HYBRID")
     budget_ok = state.get("cumulative_token_cost", 0.0) < settings.token_budget_usd
-    can_retry = iteration < settings.max_search_iterations and budget_ok
+    retries_so_far = iteration - 1
+    can_retry = retries_so_far < settings.max_search_iterations and budget_ok
 
     if combined >= ACCEPT_THRESHOLD:
         decision = "accept"
@@ -485,20 +482,27 @@ def evaluator_node(state: dict) -> dict:
         decision = "exhausted"
 
     # ── Step 3b: Near-duplicate guard (PRD 4.5) ──────────────────────────
-    # Before committing to a retry, check if the current query variant is
-    # a near-duplicate of a previously tried variant.  If so, retrying would
-    # produce the same results — force "exhausted" instead.
+    # Same retrieval strategy + semantically near-identical query variant
+    # as a prior attempt → do not retry (would reproduce the same retrieval).
     intent = state.get("parsed_intent", {})
     entities = intent.get("entities", [])
     query_variant = " ".join(entities) if entities else state.get("query", "")
     search_history = state.get("search_history", [])
 
-    if decision == "retry" and _is_near_duplicate_variant(query_variant, search_history):
+    near_dup_blocked = False
+    if decision == "retry" and _is_near_duplicate_variant(
+        query_variant, strategy, search_history,
+    ):
         logger.info(
             "near_duplicate_variant_detected",
-            extra={"query_variant": query_variant, "action": "forcing exhausted"},
+            extra={
+                "query_variant": query_variant,
+                "strategy": strategy,
+                "action": "forcing exhausted",
+            },
         )
         decision = "exhausted"
+        near_dup_blocked = True
 
     updates["evaluator_decision"] = decision
 
@@ -520,21 +524,66 @@ def evaluator_node(state: dict) -> dict:
         ).model_dump()
     )
 
-    # ── Step 5: Log exhausted as a warning ────────────────────────────────
+    # ── Step 5: Structured limit events (exhausted path) ─────────────────
     if decision == "exhausted":
-        new_errors.append(
-            ExtractionError(
-                node="evaluator",
-                severity=ErrorSeverity.WARNING,
-                message=PipelineEvent.ITERATION_LIMIT.value,
-                fallback_applied=True,
-                fallback_description=(
-                    f"Quality score {combined:.2f} is below threshold "
-                    f"{ACCEPT_THRESHOLD} after {iteration} iteration(s). "
-                    f"Sending best available results forward."
-                ),
-            ).model_dump()
-        )
+        iteration_cap = retries_so_far >= settings.max_search_iterations
+        if near_dup_blocked:
+            new_errors.append(
+                ExtractionError(
+                    node="evaluator",
+                    severity=ErrorSeverity.WARNING,
+                    message=PipelineEvent.NEAR_DUPLICATE_VARIANT.value,
+                    fallback_applied=True,
+                    fallback_description=(
+                        f"Retry blocked: same strategy {strategy!r} with a "
+                        f"near-duplicate query variant as a prior attempt "
+                        f"(Jaccard ≥ {settings.near_duplicate_threshold})."
+                    ),
+                ).model_dump()
+            )
+        if not budget_ok:
+            new_errors.append(
+                ExtractionError(
+                    node="evaluator",
+                    severity=ErrorSeverity.ERROR,
+                    message=PipelineEvent.BUDGET_EXCEEDED.value,
+                    fallback_applied=True,
+                    fallback_description=(
+                        f"Cumulative token cost ${state.get('cumulative_token_cost', 0.0):.6f} "
+                        f"meets or exceeds budget ${settings.token_budget_usd:.4f}; "
+                        f"no further evaluator-triggered retries."
+                    ),
+                ).model_dump()
+            )
+        if iteration_cap:
+            new_errors.append(
+                ExtractionError(
+                    node="evaluator",
+                    severity=ErrorSeverity.WARNING,
+                    message=PipelineEvent.ITERATION_LIMIT.value,
+                    fallback_applied=True,
+                    fallback_description=(
+                        f"Evaluator-triggered retry cap reached "
+                        f"({settings.max_search_iterations} max retries). "
+                        f"Quality score {combined:.2f} vs threshold {ACCEPT_THRESHOLD}. "
+                        f"Sending best available results forward."
+                    ),
+                ).model_dump()
+            )
+        if not new_errors:
+            # Exhausted without hitting a named guard (defensive)
+            new_errors.append(
+                ExtractionError(
+                    node="evaluator",
+                    severity=ErrorSeverity.WARNING,
+                    message=PipelineEvent.ITERATION_LIMIT.value,
+                    fallback_applied=True,
+                    fallback_description=(
+                        f"Search stopped with quality {combined:.2f} "
+                        f"after {iteration} search round(s)."
+                    ),
+                ).model_dump()
+            )
 
     # ── Step 6: Log and annotate node exit ────────────────────────────────
     duration_ms = (time.perf_counter() - start) * 1000

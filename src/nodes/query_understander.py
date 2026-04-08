@@ -19,10 +19,17 @@ from src.models.state import (
 from src.models.schema_registry import get_schema
 from src.utils.config import get_settings
 from src.utils.llm import get_llm, strip_markdown_fences, extract_token_usage
+from src.utils.injection_guard import (
+    collect_signature_hits,
+    format_user_query_for_human_message,
+    log_injection_signature_hits,
+    sanitize_query_for_llm,
+)
 from src.utils.logger import get_logger, log_node_exit, log_injection_detection
 from src.utils.langwatch_tracker import (
+    BUDGET_PROJECT_INTENT_PARSE_USD,
     get_langwatch_callback,
-    check_budget,
+    check_budget_projected,
     make_budget_exceeded_error,
     annotate_node_span,
 )
@@ -103,21 +110,39 @@ def _scan_for_injection(query: str) -> tuple[bool, float]:
         return True, 0.0
 
 
+def ensure_injection_scanner_loaded() -> bool:
+    """Preload the injection scanner model once (for startup warmup)."""
+    global _injection_scanner
+    try:
+        if _injection_scanner is None:
+            from llm_guard.input_scanners import PromptInjection
+
+            _injection_scanner = PromptInjection(
+                threshold=settings.injection_scan_threshold,
+            )
+        return True
+    except Exception as exc:
+        logger.warning(
+            "injection_scanner_warmup_failed",
+            extra={"error": str(exc)[:200]},
+        )
+        return False
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  HELPER: GPT Intent Parser
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _parse_intent_with_llm(query: str) -> tuple[dict, int, int]:
+def _parse_intent_with_llm(sanitized_query: str) -> tuple[dict, int, int]:
     """
     Calls GPT-4o-mini to parse the user query into structured intent.
 
     What it does:
-      - Sends the query with the system prompt (intent_parse.txt + schema appendix)
-      - GPT returns a JSON object with type, entities, filters, ambiguity_score, language
-      - temperature=0 ensures the same query always produces the same output
+      - Sends only static instructions in the system role (intent_parse.txt + appendix).
+      - Puts the sanitised query inside explicit human-role boundaries (PRD §4.7).
 
     Args:
-        query: The raw user search string.
+        sanitized_query: Query after heuristic instruction stripping.
 
     Returns:
         (parsed_dict, prompt_tokens, completion_tokens)
@@ -127,9 +152,11 @@ def _parse_intent_with_llm(query: str) -> tuple[dict, int, int]:
     """
     llm = get_llm()
 
+    human_content = format_user_query_for_human_message(sanitized_query)
+
     messages = [
         SystemMessage(content=_intent_system_prompt()),
-        HumanMessage(content=query),
+        HumanMessage(content=human_content),
     ]
 
     response = llm.invoke(messages, config=get_langwatch_callback())
@@ -179,8 +206,29 @@ def query_understander_node(state: dict) -> dict:
     query_hash = hashlib.md5(query.encode()).hexdigest()[:12]
     updates["query_hash"] = query_hash
 
-    # ── Step 2: Scan for prompt injection ────────────────────────────────────
-    is_safe, risk_score = _scan_for_injection(query)
+    # ── Step 1b: Heuristic sanitisation + detection logging (before any LLM) ─
+    sanitized_query, strip_patterns = sanitize_query_for_llm(query)
+    sig_hits = collect_signature_hits(query)
+    if sig_hits:
+        log_injection_signature_hits(
+            logger,
+            source="user_query",
+            doc_id=None,
+            pattern_names=sig_hits,
+            query_hash=query_hash,
+        )
+    if strip_patterns:
+        logger.warning(
+            "injection_query_instruction_stripped",
+            extra={
+                "event": "injection_query_instruction_stripped",
+                "query_hash": query_hash,
+                "stripped_patterns": strip_patterns,
+            },
+        )
+
+    # ── Step 2: Scan sanitised query (LLM Guard) ─────────────────────────────
+    is_safe, risk_score = _scan_for_injection(sanitized_query)
 
     # ── Step 3: If injection detected → hard exit to reporter ────────────────
     if not is_safe:
@@ -214,17 +262,20 @@ def query_understander_node(state: dict) -> dict:
         updates["errors"] = new_errors
         return updates
 
+    updates["sanitized_query"] = sanitized_query
+
     # ── Step 4: Parse intent with GPT-4o-mini ────────────────────────────────
     cost_usd = 0.0
 
     try:
-        check_budget(
+        check_budget_projected(
             state.get("cumulative_token_cost", 0.0),
+            BUDGET_PROJECT_INTENT_PARSE_USD,
             "query_understander",
             query_hash,
         )
 
-        parsed, prompt_tokens, completion_tokens = _parse_intent_with_llm(query)
+        parsed, prompt_tokens, completion_tokens = _parse_intent_with_llm(sanitized_query)
 
         intent = IntentModel(
             type=IntentType(parsed.get("type", "INFORMATIONAL")),
@@ -252,7 +303,9 @@ def query_understander_node(state: dict) -> dict:
         )
 
         # ── Step 6: Add sanitized query to search_history ────────────────────
-        sanitized_variant = " ".join(intent.entities) if intent.entities else query
+        sanitized_variant = (
+            " ".join(intent.entities) if intent.entities else sanitized_query
+        )
 
         new_search_history.append(
             SearchAttempt(

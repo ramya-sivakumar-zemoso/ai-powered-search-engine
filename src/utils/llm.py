@@ -9,8 +9,8 @@ from src.utils.logger import get_logger
 logger = get_logger(__name__)
 settings = get_settings()
 
-# Lazy-cached ChatOpenAI instance (reused across all nodes)
-_llm_instance: ChatOpenAI | None = None
+# Lazy-cached ChatOpenAI instances (by timeout/retries/tokens profile)
+_llm_instances: dict[tuple[int, int, int], ChatOpenAI] = {}
 
 # Max output tokens per LLM call — prevents runaway cost from long outputs
 LLM_MAX_TOKENS = 1024
@@ -18,7 +18,12 @@ LLM_REQUEST_TIMEOUT = 30
 LLM_MAX_RETRIES = 2
 
 
-def get_llm() -> ChatOpenAI:
+def get_llm(
+    *,
+    request_timeout: int | None = None,
+    max_retries: int | None = None,
+    max_tokens: int | None = None,
+) -> ChatOpenAI:
     """Return a cached ChatOpenAI client (created once, reused across calls).
 
     Uses settings from .env: OPENAI_MODEL, OPENAI_API_KEY.
@@ -27,21 +32,30 @@ def get_llm() -> ChatOpenAI:
     request_timeout prevents hung requests in production.
     max_retries handles transient OpenAI API failures.
     """
-    global _llm_instance
-    if _llm_instance is None:
-        _llm_instance = ChatOpenAI(
+    timeout = int(request_timeout if request_timeout is not None else LLM_REQUEST_TIMEOUT)
+    retries = int(max_retries if max_retries is not None else LLM_MAX_RETRIES)
+    tokens = int(max_tokens if max_tokens is not None else LLM_MAX_TOKENS)
+    key = (timeout, retries, tokens)
+
+    if key not in _llm_instances:
+        _llm_instances[key] = ChatOpenAI(
             model=settings.openai_model,
             temperature=0,
             api_key=settings.openai_api_key,
-            max_tokens=LLM_MAX_TOKENS,
-            request_timeout=LLM_REQUEST_TIMEOUT,
-            max_retries=LLM_MAX_RETRIES,
+            max_tokens=tokens,
+            request_timeout=timeout,
+            max_retries=retries,
         )
         logger.info(
             "llm_client_initialized",
-            extra={"model": settings.openai_model, "max_tokens": LLM_MAX_TOKENS},
+            extra={
+                "model": settings.openai_model,
+                "max_tokens": tokens,
+                "request_timeout": timeout,
+                "max_retries": retries,
+            },
         )
-    return _llm_instance
+    return _llm_instances[key]
 
 
 def strip_markdown_fences(text: str) -> str:

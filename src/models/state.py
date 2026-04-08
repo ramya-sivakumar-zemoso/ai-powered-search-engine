@@ -30,6 +30,8 @@ class ExplanationStatus(str, Enum):
     """Status of a reranker explanation's citation audit (PRD Section 4.6)."""
     VERIFIED = "VERIFIED"
     UNVERIFIED = "UNVERIFIED"
+    # Explanation referenced a document field/snippet that is missing, redacted, or not in the hit.
+    EXPLANATION_UNVERIFIED = "EXPLANATION_UNVERIFIED"
     DEGRADED = "DEGRADED"
     ABSENT = "ABSENT"
 
@@ -39,6 +41,8 @@ class PipelineEvent(str, Enum):
     PARTIAL_RESULTS = "PARTIAL_RESULTS"
     RERANK_DEGRADED = "RERANK_DEGRADED"
     ITERATION_LIMIT = "ITERATION_LIMIT"
+    BUDGET_EXCEEDED = "BUDGET_EXCEEDED"
+    NEAR_DUPLICATE_VARIANT = "NEAR_DUPLICATE_VARIANT"
 
 # ── Small models  ────────────────────────────────────────────
 class ExtractionError(BaseModel):
@@ -81,6 +85,9 @@ class RankedResult(BaseModel):
     new_rank: int = 0
     relevance_score: float = 0.0
     confidence: float = 0.0
+    # Meilisearch `_rankingScore` for this hit (unchanged by cross-encoder). Surfaced when
+    # explanations are stripped or EXPLANATION_UNVERIFIED so clients retain ranking signal.
+    meilisearch_ranking_score: float = 0.0
     explanation: str = ""
     explanation_citation_ids: list[str] = Field(default_factory=list)
     explanation_status: ExplanationStatus = ExplanationStatus.ABSENT
@@ -123,6 +130,8 @@ class SearchState(BaseModel):
     """
     # Original user query
     query: str = ""
+    # Heuristic-sanitised query (instruction-like fragments stripped) for LLM + retrieval fallback
+    sanitized_query: str = ""
     query_hash: str = ""
     # Traceability (PRD Section 5 — LangWatch / observability)
     session_id: str = ""
@@ -137,6 +146,12 @@ class SearchState(BaseModel):
     filter_relaxation_applied: bool = False
     # reranker output
     reranked_results: list[RankedResult] = Field(default_factory=list)
+    explanations_pending: bool = False
+    explanations_applied: bool = False
+    explanation_job_id: str = ""
+    explanation_job_status: str = ""
+    explanation_top_k: int = 0
+    explanations_async: bool = False
     # evaluator output
     quality_scores: dict[str, Any] = Field(default_factory=dict)
     evaluator_decision: str = ""
@@ -166,6 +181,7 @@ class SearchStateDict(TypedDict, total=False):
     """Typed graph state consumed by ``StateGraph(SearchStateDict)``."""
     # ── identity ──
     query: str
+    sanitized_query: str
     query_hash: str
     session_id: str
     # ── query_understander output ──
@@ -179,6 +195,12 @@ class SearchStateDict(TypedDict, total=False):
     filter_relaxation_applied: bool
     # ── reranker output ──
     reranked_results: list[dict]
+    explanations_pending: bool
+    explanations_applied: bool
+    explanation_job_id: str
+    explanation_job_status: str
+    explanation_top_k: int
+    explanations_async: bool
     # ── evaluator output ──
     quality_scores: dict[str, Any]
     evaluator_decision: str

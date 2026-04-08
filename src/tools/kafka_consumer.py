@@ -67,12 +67,11 @@ logger = get_logger(__name__)
 settings = get_settings()
 
 try:
-    from confluent_kafka import Consumer, KafkaError, KafkaException
+    from confluent_kafka import Consumer, KafkaError
     _CONFLUENT_AVAILABLE = True
 except ImportError:
     _CONFLUENT_AVAILABLE = False
 
-_SLA_SECONDS = 300  # must match ingest_api.py
 _POLL_TIMEOUT_S = 1.0  # how long to block waiting for messages per poll
 
 
@@ -223,6 +222,46 @@ class SearchIngestConsumer:
                 extra={"reason": reason, "error": str(exc)},
             )
 
+    def _normalise_message(
+        self,
+        msg: Any,
+    ) -> tuple[dict[str, Any], str] | None:
+        """Return (normalised_document, schema_name) or None if message should be skipped."""
+        if msg.error():
+            err = msg.error()
+            if err.code() == KafkaError._PARTITION_EOF:
+                return None
+            logger.error("kafka_message_error", extra={"code": err.code(), "error": str(err)})
+            return None
+
+        document, schema_name = _decode_message(msg)
+        if not document or not document.get("id"):
+            logger.warning(
+                "kafka_message_skipped",
+                extra={
+                    "reason": "missing_id_or_empty",
+                    "offset": msg.offset(),
+                    "partition": msg.partition(),
+                },
+            )
+            self._commit_single(msg, "skip_invalid_payload")
+            return None
+
+        normalised = _apply_schema(document, schema_name)
+        if normalised is None:
+            logger.warning(
+                "kafka_message_skipped",
+                extra={
+                    "reason": "schema_rejected",
+                    "offset": msg.offset(),
+                    "partition": msg.partition(),
+                    "id": document.get("id"),
+                },
+            )
+            self._commit_single(msg, "skip_schema_rejected")
+            return None
+        return normalised, schema_name
+
     def _poll_and_process(self) -> None:
         """Poll up to KAFKA_MAX_POLL_RECORDS messages and upsert as one batch."""
         messages = self._consumer.consume(
@@ -238,43 +277,10 @@ class SearchIngestConsumer:
         raw_messages = []
 
         for msg in messages:
-            if msg.error():
-                err = msg.error()
-                if err.code() == KafkaError._PARTITION_EOF:
-                    continue  # end of partition, not a real error
-                logger.error(
-                    "kafka_message_error",
-                    extra={"code": err.code(), "error": str(err)},
-                )
+            normalised_payload = self._normalise_message(msg)
+            if normalised_payload is None:
                 continue
-
-            document, schema_name = _decode_message(msg)
-            if not document or not document.get("id"):
-                logger.warning(
-                    "kafka_message_skipped",
-                    extra={
-                        "reason": "missing_id_or_empty",
-                        "offset": msg.offset(),
-                        "partition": msg.partition(),
-                    },
-                )
-                self._commit_single(msg, "skip_invalid_payload")
-                continue
-
-            normalised = _apply_schema(document, schema_name)
-            if normalised is None:
-                logger.warning(
-                    "kafka_message_skipped",
-                    extra={
-                        "reason": "schema_rejected",
-                        "offset": msg.offset(),
-                        "partition": msg.partition(),
-                        "id": document.get("id"),
-                    },
-                )
-                self._commit_single(msg, "skip_schema_rejected")
-                continue
-
+            normalised, schema_name = normalised_payload
             batches.setdefault(schema_name, []).append(normalised)
             raw_messages.append(msg)
 
@@ -316,10 +322,10 @@ class SearchIngestConsumer:
             result = upsert_documents(
                 documents,
                 wait=True,
-                sla_seconds=_SLA_SECONDS,
+                sla_seconds=settings.ingest_sla_seconds,
             )
             elapsed = result["elapsed_seconds"]
-            sla_ok = elapsed <= _SLA_SECONDS
+            sla_ok = elapsed <= settings.ingest_sla_seconds
             self._stats["processed"] += len(documents)
             if not sla_ok:
                 self._stats["sla_breaches"] += 1
@@ -394,9 +400,11 @@ def _cli() -> None:
     args = parser.parse_args()
 
     if not settings.kafka_enabled:
-        print(
-            "KAFKA_ENABLED=false in .env — set KAFKA_ENABLED=true to activate the consumer.",
-            file=sys.stderr,
+        logger.error(
+            "kafka_consumer_disabled",
+            extra={
+                "message": "KAFKA_ENABLED=false in .env — set KAFKA_ENABLED=true to activate the consumer."
+            },
         )
         sys.exit(1)
 

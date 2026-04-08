@@ -31,6 +31,7 @@ from src.tools.meilisearch_client import (
     get_index_updated_at_meta,
 )
 from src.utils.config import get_settings
+from src.utils.injection_guard import get_effective_user_query
 from src.utils.logger import get_logger, log_node_exit
 from src.utils.langwatch_tracker import annotate_node_span
 
@@ -178,7 +179,7 @@ def _build_search_query(state: dict) -> str:
     if entities:
         return " ".join(entities)
 
-    return state.get("query", "")
+    return get_effective_user_query(state)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

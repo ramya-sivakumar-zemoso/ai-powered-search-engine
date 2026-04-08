@@ -197,7 +197,9 @@ def _is_rerank_degraded(state: dict, results: list[dict]) -> bool:
         return True
 
     for r in results:
-        if isinstance(r, dict) and r.get("explanation_status") == "DEGRADED":
+        if not isinstance(r, dict):
+            continue
+        if r.get("explanation_status") in ("DEGRADED", "EXPLANATION_UNVERIFIED"):
             return True
 
     for error in state.get("errors", []):
@@ -208,6 +210,58 @@ def _is_rerank_degraded(state: dict, results: list[dict]) -> bool:
             return True
 
     return False
+
+
+def assemble_final_response(state: dict) -> dict:
+    """Build the final response payload from the current pipeline state."""
+    # ── Step 1: Pick the best available results ───────────────────────────
+    results, result_source = _pick_best_results(state)
+    blocked = _is_blocked(state)
+    partial_results = _is_partial_results(state)
+    rerank_degraded = _is_rerank_degraded(state, results)
+    session_id = state.get("session_id", "")
+    strategy = state.get("retrieval_strategy", "HYBRID")
+    explanation_status = state.get("explanation_job_status", "")
+    explanations_pending = bool(state.get("explanations_pending", False))
+    explanation_top_k = int(state.get("explanation_top_k", 0) or 0)
+    explanation_job_id = state.get("explanation_job_id", "")
+
+    final_response = {
+        "query": state.get("query", ""),
+        "query_hash": state.get("query_hash", ""),
+        "session_id": session_id,
+        "blocked": blocked,
+        "partial_results": partial_results,
+        "rerank_degraded": rerank_degraded,
+        "results": results,
+        "result_count": len(results),
+        "result_source": result_source,
+        "quality_summary": state.get("quality_scores", {}),
+        "freshness_report": state.get("freshness_metadata", {}),
+        "cost_summary": _build_cost_summary(state),
+        "pipeline_metadata": {
+            "session_id": session_id,
+            "strategy": strategy,
+            "iterations": state.get("iteration_count", 0),
+            "evaluator_decision": state.get("evaluator_decision", "N/A"),
+            "filter_relaxation_applied": state.get("filter_relaxation_applied", False),
+            "router_reasoning": state.get("router_reasoning", ""),
+            "explanations_pending": explanations_pending,
+            "explanations_async": bool(state.get("explanations_async", False)),
+            "explanation_status": explanation_status,
+            "explanation_top_k": explanation_top_k,
+        },
+        "explanations": {
+            "pending": explanations_pending,
+            "async": bool(state.get("explanations_async", False)),
+            "status": explanation_status,
+            "job_id": explanation_job_id,
+            "top_k": explanation_top_k,
+        },
+        "warnings": _build_warnings(state),
+    }
+    final_response["structured_text"] = _build_structured_text_response(final_response)
+    return final_response
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -232,46 +286,12 @@ def reporter_node(state: dict) -> dict:
     start = time.perf_counter()
     query_hash = state.get("query_hash", "")
     strategy = state.get("retrieval_strategy", "HYBRID")
-
-    # ── Step 1: Pick the best available results ───────────────────────────
-    results, result_source = _pick_best_results(state)
-    blocked = _is_blocked(state)
-    partial_results = _is_partial_results(state)
-    rerank_degraded = _is_rerank_degraded(state, results)
-
-    # ── Step 2: Build the final response payload ─────────────────────────
-    session_id = state.get("session_id", "")
-
-    final_response = {
-        "query": state.get("query", ""),
-        "query_hash": query_hash,
-        "session_id": session_id,
-        "blocked": blocked,
-        "partial_results": partial_results,
-        "rerank_degraded": rerank_degraded,
-
-        "results": results,
-        "result_count": len(results),
-        "result_source": result_source,
-
-        "quality_summary": state.get("quality_scores", {}),
-
-        "freshness_report": state.get("freshness_metadata", {}),
-
-        "cost_summary": _build_cost_summary(state),
-
-        "pipeline_metadata": {
-            "session_id": session_id,
-            "strategy": strategy,
-            "iterations": state.get("iteration_count", 0),
-            "evaluator_decision": state.get("evaluator_decision", "N/A"),
-            "filter_relaxation_applied": state.get("filter_relaxation_applied", False),
-            "router_reasoning": state.get("router_reasoning", ""),
-        },
-
-        "warnings": _build_warnings(state),
-    }
-    final_response["structured_text"] = _build_structured_text_response(final_response)
+    final_response = assemble_final_response(state)
+    results = final_response.get("results", [])
+    result_source = final_response.get("result_source", "none")
+    blocked = bool(final_response.get("blocked", False))
+    partial_results = bool(final_response.get("partial_results", False))
+    rerank_degraded = bool(final_response.get("rerank_degraded", False))
 
     # ── Step 3: Log and annotate node exit ────────────────────────────────
     duration_ms = (time.perf_counter() - start) * 1000

@@ -33,6 +33,7 @@ from src.models.schema_registry import get_schema
 from src.utils.config import get_settings
 from src.utils.langwatch_tracker import setup_langwatch
 from src.utils.logger import get_logger
+from src.utils.model_warmup import start_background_warmup
 
 logger = get_logger(__name__)
 
@@ -157,9 +158,12 @@ def _print_summary(final_state: dict) -> None:
             conf = r.get("confidence", 0.0)
             status = r.get("explanation_status", "ABSENT")
             expl = r.get("explanation", "")
+            meili_rs = r.get("meilisearch_ranking_score")
             print(f"    #{new}. id={title} (was #{orig}, conf: {conf:.4f}, {status})")
             if expl:
                 print(f"         → {expl[:100]}{'...' if len(expl) > 100 else ''}")
+            elif status == "EXPLANATION_UNVERIFIED" and meili_rs is not None:
+                print(f"         → Meilisearch ranking score: {float(meili_rs):.4f} (explanation omitted)")
 
     # ── Section 4: Pipeline Metrics ───────────────────────────────────────
     print(f"\n  Result Source:    {resp.get('result_source', 'N/A')}")
@@ -261,6 +265,7 @@ def main() -> None:
 
     # ── Initialize LangWatch ──────────────────────────────────────────────
     setup_langwatch()
+    start_background_warmup()
 
     # ── Pick the query ────────────────────────────────────────────────────
     demos = _demo_queries()

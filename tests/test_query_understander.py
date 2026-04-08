@@ -58,7 +58,7 @@ def test_successful_parse(mocker):
             50,
         ),
     )
-    mocker.patch("src.nodes.query_understander.check_budget")
+    mocker.patch("src.nodes.query_understander.check_budget_projected")
 
     result = query_understander_node(_base_state())
 
@@ -76,7 +76,7 @@ def test_successful_parse(mocker):
 def test_budget_exceeded(mocker):
     _mock_safe(mocker)
     mocker.patch(
-        "src.nodes.query_understander.check_budget",
+        "src.nodes.query_understander.check_budget_projected",
         side_effect=ValueError("BUDGET_EXCEEDED"),
     )
     result = query_understander_node(_base_state())
@@ -88,7 +88,7 @@ def test_budget_exceeded(mocker):
 
 def test_bad_json_fallback(mocker):
     _mock_safe(mocker)
-    mocker.patch("src.nodes.query_understander.check_budget")
+    mocker.patch("src.nodes.query_understander.check_budget_projected")
     mocker.patch(
         "src.nodes.query_understander._parse_intent_with_llm",
         side_effect=json.JSONDecodeError("bad", "", 0),
@@ -105,7 +105,7 @@ def test_bad_json_fallback(mocker):
 
 def test_llm_failure_fallback(mocker):
     _mock_safe(mocker)
-    mocker.patch("src.nodes.query_understander.check_budget")
+    mocker.patch("src.nodes.query_understander.check_budget_projected")
     mocker.patch(
         "src.nodes.query_understander._parse_intent_with_llm",
         side_effect=RuntimeError("OpenAI API unreachable"),

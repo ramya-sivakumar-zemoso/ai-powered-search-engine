@@ -8,20 +8,24 @@ Run:
 """
 
 import html
-import json
+import time
 import uuid
 
 import streamlit as st
-from src.graph.graph import run_search_with_trace
+from src.graph.graph import run_search_with_trace, hydrate_async_explanations
 from src.models.schema_registry import get_schema
 from src.utils.config import get_settings
+from src.utils.model_warmup import start_background_warmup
 from src.utils.state_display import to_jsonable
 
 _settings = get_settings()
 _ui_schema = get_schema(_settings.dataset_schema)
+start_background_warmup()
 
 if "pipeline_session_id" not in st.session_state:
     st.session_state.pipeline_session_id = str(uuid.uuid4())
+if "last_pipeline_result" not in st.session_state:
+    st.session_state.last_pipeline_result = None
 
 st.set_page_config(
     page_title=_ui_schema.ui_product_title,
@@ -186,7 +190,12 @@ _NODE_OWN_KEYS: dict[str, set[str]] = {
     "retrieval_router":   {"retrieval_strategy", "hybrid_weights", "router_reasoning"},
     "searcher":           {"search_results", "freshness_metadata", "filter_relaxation_applied"},
     "evaluator":          {"quality_scores", "evaluator_decision", "retry_prescription"},
-    "reranker":           {"reranked_results"},
+    "reranker":           {
+        "reranked_results",
+        "explanations_pending",
+        "explanation_job_status",
+        "explanation_top_k",
+    },
     "reporter":           {"final_response"},
 }
 
@@ -319,6 +328,53 @@ def _render_reporter_tab(delta: dict, max_hits: int) -> None:
                     st.write(expl)
             else:
                 st.text(header)
+                if status == "EXPLANATION_UNVERIFIED" and r.get("meilisearch_ranking_score") is not None:
+                    st.caption(
+                        f"Meilisearch ranking score: {float(r['meilisearch_ranking_score']):.4f} "
+                        "(explanation omitted — field citation could not be verified)"
+                    )
+
+
+def _render_evaluator_tab(final_state: dict) -> None:
+    """Render a clean final 5-signal view (deduplicated)."""
+    qs = final_state.get("quality_scores", {}) if isinstance(final_state, dict) else {}
+    decision = final_state.get("evaluator_decision", "N/A") if isinstance(final_state, dict) else "N/A"
+    iteration = final_state.get("iteration_count", 0) if isinstance(final_state, dict) else 0
+
+    def _num(v):
+        return round(float(v), 4) if isinstance(v, (int, float)) else None
+
+    payload = {
+        "evaluator_decision": decision,
+        "iteration_count": iteration,
+        "signals": {
+            "semantic_relevance": _num(qs.get("semantic_relevance")),
+            "result_coverage": _num(qs.get("result_coverage")),
+            "ranking_stability": _num(qs.get("ranking_stability")),
+            "freshness_signal": _num(qs.get("freshness_signal")),
+            "rerank_confidence": _num(qs.get("rerank_confidence")),
+        },
+        "combined": _num(qs.get("combined")),
+    }
+    st.json(payload)
+
+
+def _current_node_overlay(node_name: str, final_state: dict) -> dict | None:
+    """Use hydrated state for reranker/reporter inspector tabs when available."""
+    if not isinstance(final_state, dict):
+        return None
+    if not final_state.get("explanations_applied", False):
+        return None
+    if node_name == "reranker":
+        return {
+            "reranked_results": final_state.get("reranked_results", []),
+            "explanations_pending": final_state.get("explanations_pending", False),
+            "explanation_job_status": final_state.get("explanation_job_status", ""),
+            "explanation_top_k": final_state.get("explanation_top_k", 0),
+        }
+    if node_name == "reporter":
+        return {"final_response": final_state.get("final_response", {})}
+    return None
 
 
 def _to_dict(obj):
@@ -340,13 +396,6 @@ def _build_result_lookup(search_results: list) -> dict:
 
 _CONFIDENCE_BEST = 0.7
 _CONFIDENCE_GOOD = 0.3
-_NEGATIVE_PHRASES = frozenset({
-    "not relevant", "no connection", "does not relate", "doesn't relate",
-    "unrelated", "not related", "no relation", "does not match",
-    "doesn't match", "not a match", "does not involve", "doesn't involve",
-})
-
-
 def _truncate(text: str, length: int = 250) -> str:
     if not text or len(text) <= length:
         return text or ""
@@ -359,14 +408,6 @@ def _match_label_html(confidence: float) -> str:
     if confidence >= _CONFIDENCE_GOOD:
         return '<span class="match-label match-good">Good Match</span>'
     return ""
-
-
-def _is_positive_explanation(explanation: str) -> bool:
-    """Return False if the explanation says the result is NOT relevant."""
-    if not explanation:
-        return False
-    lower = explanation.lower()
-    return not any(phrase in lower for phrase in _NEGATIVE_PHRASES)
 
 
 def _render_card_body(result: dict, search_hit: dict | None) -> None:
@@ -389,17 +430,9 @@ def _render_card_body(result: dict, search_hit: dict | None) -> None:
         tags = [category]
 
     confidence = result.get("confidence", 0.0)
-    explanation = result.get("explanation", "")
     expl_status = result.get("explanation_status", "ABSENT")
     if not isinstance(expl_status, str):
         expl_status = getattr(expl_status, "value", "ABSENT")
-
-    show_insight = (
-        explanation
-        and expl_status not in ("ABSENT", "DEGRADED")
-        and confidence >= _CONFIDENCE_GOOD
-        and _is_positive_explanation(explanation)
-    )
 
     if img_key:
         col_poster, col_body = st.columns([1, 7])
@@ -435,14 +468,12 @@ def _render_card_body(result: dict, search_hit: dict | None) -> None:
                 unsafe_allow_html=True,
             )
 
-        if show_insight:
-            st.markdown(
-                f'<div class="ai-insight">'
-                f'<div class="ai-insight-label">Why this matches</div>'
-                f'{html.escape(explanation)}'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
+        if expl_status == "EXPLANATION_UNVERIFIED":
+            meili_rs = result.get("meilisearch_ranking_score")
+            if meili_rs is not None:
+                st.caption(
+                    f"Meilisearch ranking score: {float(meili_rs):.4f}"
+                )
 
 
 def _render_pipeline_status_badges(fr: dict) -> None:
@@ -470,6 +501,41 @@ def _render_pipeline_status_badges(fr: dict) -> None:
     )
 
 
+def _render_total_label(total_label: str) -> None:
+    st.markdown(
+        f'<span style="font-size:14px;color:#8b949e;">'
+        f'<strong style="color:#e6edf3;">{total_label}</strong> found</span>',
+        unsafe_allow_html=True,
+    )
+
+
+def _render_result_cards(items: list[tuple[dict, dict | None]]) -> None:
+    for rd, search_hit in items:
+        with st.container(border=True):
+            _render_card_body(rd, search_hit)
+
+
+def _split_results_by_confidence(
+    results: list,
+    result_source: str,
+    search_lookup: dict,
+) -> tuple[list[tuple[dict, dict | None]], list[tuple[dict, dict | None]]]:
+    top_results: list[tuple[dict, dict | None]] = []
+    other_results: list[tuple[dict, dict | None]] = []
+    for raw_result in results:
+        rd = _to_dict(raw_result)
+        rid = str(rd.get("id", ""))
+        search_hit = search_lookup.get(rid)
+        if result_source == "reranked":
+            confidence = rd.get("confidence", 0.0)
+        else:
+            confidence = rd.get("score", 0.0)
+            rd = {"id": rid, "confidence": confidence}
+        bucket = top_results if confidence >= _CONFIDENCE_GOOD else other_results
+        bucket.append((rd, search_hit))
+    return top_results, other_results
+
+
 def render_serp(final_state: dict) -> None:
     """Render the consumer-facing search engine results page."""
     fr = final_state.get("final_response", {})
@@ -494,46 +560,15 @@ def render_serp(final_state: dict) -> None:
 
     search_lookup = _build_result_lookup(final_state.get("search_results", []))
 
-    top_results = []
-    other_results = []
-
-    for idx, r in enumerate(results):
-        rd = _to_dict(r)
-        rid = str(rd.get("id", ""))
-        search_hit = search_lookup.get(rid)
-
-        if result_source == "reranked":
-            confidence = rd.get("confidence", 0.0)
-        else:
-            confidence = rd.get("score", 0.0)
-            rd = {"id": rid, "confidence": confidence}
-
-        if confidence >= _CONFIDENCE_GOOD:
-            top_results.append((rd, search_hit))
-        else:
-            other_results.append((rd, search_hit))
+    top_results, other_results = _split_results_by_confidence(
+        results=results,
+        result_source=result_source,
+        search_lookup=search_lookup,
+    )
 
     total_label = f"{result_count} result{'s' if result_count != 1 else ''}"
 
-    if not top_results:
-        st.markdown(
-            f'<span style="font-size:14px;color:#8b949e;">'
-            f'<strong style="color:#e6edf3;">{total_label}</strong> found</span>',
-            unsafe_allow_html=True,
-        )
-        for rd, search_hit in other_results:
-            with st.container(border=True):
-                _render_card_body(rd, search_hit)
-    elif not other_results:
-        st.markdown(
-            f'<span style="font-size:14px;color:#8b949e;">'
-            f'<strong style="color:#e6edf3;">{total_label}</strong> found</span>',
-            unsafe_allow_html=True,
-        )
-        for rd, search_hit in top_results:
-            with st.container(border=True):
-                _render_card_body(rd, search_hit)
-    else:
+    if top_results and other_results:
         shown = len(top_results)
         st.markdown(
             f'<span style="font-size:14px;color:#8b949e;">'
@@ -541,13 +576,13 @@ def render_serp(final_state: dict) -> None:
             f'top result{"s" if shown != 1 else ""} of {total_label}</span>',
             unsafe_allow_html=True,
         )
-        for rd, search_hit in top_results:
-            with st.container(border=True):
-                _render_card_body(rd, search_hit)
+        _render_result_cards(top_results)
         with st.expander(f"More results ({len(other_results)})"):
-            for rd, search_hit in other_results:
-                with st.container(border=True):
-                    _render_card_body(rd, search_hit)
+            _render_result_cards(other_results)
+        return
+
+    _render_total_label(total_label)
+    _render_result_cards(top_results or other_results)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -591,12 +626,28 @@ if run and query.strip():
                 query.strip(),
                 session_id=st.session_state.pipeline_session_id,
             )
+            st.session_state.last_pipeline_result = {
+                "query": query.strip(),
+                "trace": trace,
+                "final_state": final_state,
+            }
         except Exception as exc:
             st.exception(exc)
             st.stop()
 
-    # ── Tabs: Search Results (consumer) + Pipeline Inspector (debug) ───────
+if st.session_state.last_pipeline_result:
+    final_state = st.session_state.last_pipeline_result["final_state"]
+    trace = st.session_state.last_pipeline_result["trace"]
 
+    if final_state.get("explanations_pending", False):
+        final_state = hydrate_async_explanations(final_state)
+        st.session_state.last_pipeline_result["final_state"] = final_state
+        if final_state.get("explanations_pending", False):
+            # Seamless background refresh while async explanation job is pending.
+            time.sleep(1.2)
+            st.rerun()
+
+    # ── Tabs: Search Results (consumer) + Pipeline Inspector (debug) ───────
     tab_results, tab_pipeline = st.tabs(["Search Results", "Pipeline Inspector"])
 
     # ── Tab 1: Search Results (end-user SERP) ─────────────────────────────
@@ -607,27 +658,45 @@ if run and query.strip():
     with tab_pipeline:
         render_pipeline_flow()
 
-        node_counts: dict[str, int] = {}
-        sub_labels: list[str] = []
+        trace_by_node: dict[str, list[dict]] = {}
         for step in trace:
-            name = step["node"]
-            node_counts[name] = node_counts.get(name, 0) + 1
-            n = node_counts[name]
-            label = NODE_LABELS.get(name, name)
-            sub_labels.append(label if n == 1 else f"{label} ({n})")
+            name = step.get("node", "")
+            if not name:
+                continue
+            trace_by_node.setdefault(name, []).append(step)
+
+        sub_labels: list[str] = []
+        for node_name in PIPELINE_ORDER:
+            base = NODE_LABELS.get(node_name, node_name)
+            runs = len(trace_by_node.get(node_name, []))
+            if runs == 0:
+                sub_labels.append(f"{base} (skipped)")
+            elif runs == 1:
+                sub_labels.append(base)
+            else:
+                sub_labels.append(f"{base} ({runs}x)")
 
         sub_labels.append("raw state")
         sub_tabs = st.tabs(sub_labels)
 
         for i, tab in enumerate(sub_tabs[:-1]):
             with tab:
-                step = trace[i]
-                name = step["node"]
-                delta = step.get("output", {})
+                name = PIPELINE_ORDER[i]
+                steps = trace_by_node.get(name, [])
+                step = steps[-1] if steps else {}
+                delta = step.get("output", {}) if isinstance(step, dict) else {}
 
                 css = NODE_COLORS.get(name, "")
                 label = NODE_LABELS.get(name, name)
                 st.markdown(f'<span class="node-tag {css}">{label}</span>', unsafe_allow_html=True)
+
+                if not steps:
+                    st.caption("This node was skipped by routing for this query.")
+                    if name == "reranker":
+                        decision = final_state.get("evaluator_decision", "")
+                        if decision and decision != "accept":
+                            st.caption(f"Reason: evaluator decision was `{decision}`.")
+                    continue
 
                 if not delta:
                     st.markdown(
@@ -635,9 +704,21 @@ if run and query.strip():
                         unsafe_allow_html=True,
                     )
                 elif name == "reporter":
-                    _render_reporter_tab(delta, int(max_hits))
+                    overlay = _current_node_overlay(name, final_state)
+                    if overlay is not None:
+                        st.caption("Showing hydrated reporter state (post-async explanations).")
+                        _render_reporter_tab(overlay, int(max_hits))
+                    else:
+                        _render_reporter_tab(delta, int(max_hits))
+                elif name == "evaluator":
+                    st.caption("Showing final merged evaluator values.")
+                    _render_evaluator_tab(final_state)
                 else:
-                    filtered = _filter_node_delta(name, to_jsonable(delta, max_search_hits=int(max_hits)))
+                    overlay = _current_node_overlay(name, final_state)
+                    payload = overlay if overlay is not None else delta
+                    if overlay is not None:
+                        st.caption("Showing hydrated reranker state (post-async explanations).")
+                    filtered = _filter_node_delta(name, to_jsonable(payload, max_search_hits=int(max_hits)))
                     if filtered:
                         st.json(filtered)
                     else:
