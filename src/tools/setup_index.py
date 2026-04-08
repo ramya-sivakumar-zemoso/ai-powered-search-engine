@@ -65,6 +65,7 @@ def configure_embedder(index_name: str, schema) -> dict:
         settings.meili_embedder_name: {
             "source": "huggingFace",
             "model": settings.embedding_model,
+            "dimensions": settings.embedding_dimensions,
             "documentTemplate": schema.embedder_template,
         }
     }

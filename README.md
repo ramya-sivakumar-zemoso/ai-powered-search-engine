@@ -1,6 +1,6 @@
 # AI-Powered Search Engine
 
-Hybrid search on **Meilisearch** (keyword + semantic) with **multilingual E5** embeddings (`intfloat/multilingual-e5-large` via `EMBEDDING_MODEL`) on the index, and a **BGE** cross-encoder reranker (`BAAI/bge-reranker-v2-m3` via `RERANKER_MODEL`) in the pipeline.
+Hybrid search on **Meilisearch** (keyword + semantic) with **EmbeddingGemma** embeddings (`google/embeddinggemma-300m` via `EMBEDDING_MODEL`, 768 dims) on the index, and a **BGE** cross-encoder reranker (`BAAI/bge-reranker-v2-m3` via `RERANKER_MODEL`) in the pipeline.
 
 The codebase is **domain-agnostic**: movies, e-commerce, sports (and others) are configured by a **`DatasetSchema`** in `src/models/schema_registry.py`, selected with **`DATASET_SCHEMA`** in `.env`. Ingest maps raw columns → the shared internal document shape (`title`, `description`, `category`, `brand`, …) via **`FieldMapping`**. The pipeline (intent parsing, filters, retrieve fields, reranker text, Streamlit labels) reads that schema so behavior stays consistent across verticals.
 
@@ -8,7 +8,7 @@ The codebase is **domain-agnostic**: movies, e-commerce, sports (and others) are
 
 ## Requirements
 
-- Python 3.12+
+- Python 3.10+ (see `pyproject.toml`; 3.12+ recommended)
 - Meilisearch (see `.env.example` for `MEILI_*` vars)
 
 ## Setup
@@ -39,8 +39,11 @@ Optional env defaults: `DATASET_FILE`, `DATASET_SCHEMA` (see `.env.example`).
 
 ## Verify
 
+After indexing, run a pipeline query (needs `OPENAI_API_KEY` for LLM nodes):
+
 ```bash
-python scripts/verify_search.py --schema movies
+python main.py --query "science fiction adventure"
+# or: streamlit run streamlit_app.py
 ```
 
 ## Response flags

@@ -132,7 +132,7 @@ Using **gpt-4o-mini**-style list pricing (verify current OpenAI rates):
 - **Reranker explanations (batch):** ~800 prompt + ~400 completion → ~\$0.00012 + ~\$0.00024 ≈ **\$0.00036** per query.
 - **Rough LLM subtotal:** ~**\$0.0005** per query when both calls run (order-of-magnitude).
 
-Cross-encoder runs **locally** (HF model download cost amortized; no API tokens).
+Cross-encoder and **EmbeddingGemma** both run **locally** via Meilisearch's HuggingFace embedder (model download cost amortized; no API tokens). EmbeddingGemma 300M (~300 MB) is substantially smaller than the prior multilingual-E5-large (~2.2 GB), reducing cold-start time and memory pressure on the Meilisearch host.
 
 ## 12. Multi-domain configuration (NovaMart / movies / sports)
 
