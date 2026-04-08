@@ -90,10 +90,34 @@ Design implication: keep a single evaluator algorithm, but treat weights as a **
 
 ## 7. Prompt injection (PRD §4.7)
 
-- **Query path:** LLM Guard `PromptInjection` scanner + strict classifier prompt guardrails; **`INJECTION_DETECTED`** short-circuits to **`reporter`**.
-- **Document path:** `_sanitize_field` strips instruction-like **lines**; results are wrapped in **`doc_*`** tags so document text is not in the system role.
+Adversarial queries and malicious vendor text are both fed into LLM prompts (intent parse, reranker explanations). Mitigations are **layered** and **logged**.
 
-**Limit:** Natural-language injections that evade regex/ML scanners remain an open class; defense is layered (scanner + boundaries + citation audit + human review of listings).
+### 7.1 Query sanitisation (before any LLM)
+
+- **`sanitize_query_for_llm`** (`src/utils/injection_guard.py`) removes:
+  - Lines that start with role markers or instruction idioms (`system:`, `ignore previous instructions`, `disregard the above`, `return all results`, ChatML-like tags, etc.).
+  - Inline substrings matching the same class of attacks (word-boundary regexes).
+- Output is stored as **`sanitized_query`** in graph state and used for:
+  - **LLM Guard** `PromptInjection.scan(sanitized_query)` (threshold `INJECTION_SCAN_THRESHOLD`).
+  - **Intent parsing** human message (never raw query in the system role).
+  - **Retrieval** fallback when there are no parsed entities (`get_effective_user_query` → Meilisearch query string).
+  - **Reranker** cross-encoder and explanation prompts (`get_effective_user_query`).
+
+### 7.2 Content boundary enforcement
+
+- **Intent LLM:** System message = static `intent_parse.txt` (+ schema appendix only). User string is wrapped in **`<user_query_boundary>`** … **`</user_query_boundary>`** via `format_user_query_for_human_message` (human role only).
+- **Reranker LLM:** System message = static `reranker_explanation.txt`. Human message = same query boundary block + outer **`<vendor_listing_documents>`** … **`</vendor_listing_documents>`** enclosing the per-hit lines. Each hit still uses inner **`<doc_*>`** field tags (`format_rerank_explanation_human_message`).
+
+### 7.3 Detection logging
+
+- **Signature hits** on the **raw** user query: `collect_signature_hits` → structured **`injection_signature_hit`** (`log_injection_signature_hits`) with `patterns_matched`, `query_hash`, `source=user_query`.
+- **Heuristic strips** on the query: **`injection_query_instruction_stripped`** with `stripped_patterns`.
+- **Vendor fields** (title + `rerank_auxiliary_fields`): `collect_signature_hits` on raw field text → **`injection_signature_hit`** with `source=vendor_listing_field`, `doc_id`, `query_hash`; stripping actions → **`injection_listing_instruction_stripped`**.
+- **LLM Guard block:** existing **`injection_detected`** / **`INJECTION_DETECTED`** path to **`reporter`**.
+
+### 7.4 Limits
+
+Natural-language injections that evade regex + ML remain an open class; defense is layered (sanitise → scan → delimit → cite-audit + human review of listings).
 
 ## 8. Loop prevention (PRD §4.5)
 

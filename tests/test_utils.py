@@ -4,7 +4,12 @@ import pytest
 from datetime import datetime
 from enum import Enum
 
-from src.utils.langwatch_tracker import check_budget, make_budget_exceeded_error
+from src.utils.llm import strip_markdown_fences, extract_token_usage
+from src.utils.langwatch_tracker import (
+    check_budget,
+    check_budget_projected,
+    make_budget_exceeded_error,
+)
 from src.utils.state_display import state_delta, to_jsonable
 
 
@@ -15,6 +20,15 @@ def test_budget_within_limit():
 def test_budget_exceeded():
     with pytest.raises(ValueError, match="BUDGET_EXCEEDED"):
         check_budget(1.0, "node", "hash")
+
+
+def test_budget_projected_exceeds_limit():
+    with pytest.raises(ValueError, match="BUDGET_EXCEEDED"):
+        check_budget_projected(0.019, 0.002, "node", "hash")
+
+
+def test_budget_projected_allows_small_call():
+    check_budget_projected(0.001, 0.002, "node", "hash")
 
 
 def test_make_budget_error_fields():
@@ -68,8 +82,6 @@ def test_to_jsonable_pydantic_model():
 
 
 # ── LLM Utilities ──────────────────────────────────────────────────────────
-
-from src.utils.llm import strip_markdown_fences, extract_token_usage
 
 
 @pytest.mark.parametrize("inp, expected", [

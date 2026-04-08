@@ -7,7 +7,6 @@ from pathlib import Path
 from langchain_core.messages import SystemMessage, HumanMessage
 
 from src.models.state import (
-    RetrievalStrategy,
     TokenUsage,
     ExtractionError,
     ErrorSeverity,
@@ -17,7 +16,8 @@ from src.utils.llm import get_llm, strip_markdown_fences, extract_token_usage
 from src.utils.logger import get_logger, log_node_exit
 from src.utils.langwatch_tracker import (
     get_langwatch_callback,
-    check_budget,
+    BUDGET_PROJECT_RETRIEVAL_ROUTE_USD,
+    check_budget_projected,
     make_budget_exceeded_error,
     annotate_node_span,
 )
@@ -244,34 +244,42 @@ def retrieval_router_node(state: dict) -> dict:
     cost_usd = 0.0
 
     try:
-        check_budget(
-            state.get("cumulative_token_cost", 0.0),
-            "retrieval_router", query_hash,
-        )
+        if not settings.router_use_llm:
+            strategy, semantic_ratio, rule_applied, reasoning = _heuristic_route(
+                intent_type, ambiguity_score, entities,
+            )
+            reasoning += " (heuristic default — ROUTER_USE_LLM=false)"
+        else:
+            check_budget_projected(
+                state.get("cumulative_token_cost", 0.0),
+                BUDGET_PROJECT_RETRIEVAL_ROUTE_USD,
+                "retrieval_router",
+                query_hash,
+            )
 
-        parsed, prompt_tokens, completion_tokens = _route_with_llm(
-            parsed_intent, retry_prescription, search_history,
-        )
+            parsed, prompt_tokens, completion_tokens = _route_with_llm(
+                parsed_intent, retry_prescription, search_history,
+            )
 
-        strategy = parsed.get("strategy", "HYBRID")
-        semantic_ratio = float(parsed.get("semanticRatio", 0.60))
-        rule_applied = int(parsed.get("rule_applied", 0))
-        reasoning = parsed.get("reasoning", "")
-        used_llm = True
+            strategy = parsed.get("strategy", "HYBRID")
+            semantic_ratio = float(parsed.get("semanticRatio", 0.60))
+            rule_applied = int(parsed.get("rule_applied", 0))
+            reasoning = parsed.get("reasoning", "")
+            used_llm = True
 
-        cost_usd = (prompt_tokens * 0.000000150) + (completion_tokens * 0.000000600)
+            cost_usd = (prompt_tokens * 0.000000150) + (completion_tokens * 0.000000600)
 
-        new_token_usage.append(
-            TokenUsage(
-                node="retrieval_router",
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                cost_usd=round(cost_usd, 8),
-            ).model_dump()
-        )
-        updates["cumulative_token_cost"] = round(
-            state.get("cumulative_token_cost", 0.0) + cost_usd, 8
-        )
+            new_token_usage.append(
+                TokenUsage(
+                    node="retrieval_router",
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    cost_usd=round(cost_usd, 8),
+                ).model_dump()
+            )
+            updates["cumulative_token_cost"] = round(
+                state.get("cumulative_token_cost", 0.0) + cost_usd, 8
+            )
 
     except ValueError:
         new_errors.append(make_budget_exceeded_error("retrieval_router").model_dump())

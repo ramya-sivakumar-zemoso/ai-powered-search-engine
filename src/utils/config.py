@@ -20,9 +20,20 @@ class Settings:
     openai_api_key: str
     openai_model: str
 
-    # ── Embeddings ───────────────────────────────────────
+    # ── Embeddings (Meilisearch embedder in setup_index) ──
+    # embedder_source: local | openai | gemini | self_hosted
+    # gemini: Gemini Developer API (batchEmbedContents + x-goog-api-key), see gemini_meili_embedder.py.
+    # self_hosted: OpenAI-compatible embedding server (e.g. HuggingFace TEI).
+    embedder_source: str
     embedding_model: str
     embedding_dimensions: int
+    # Gemini Developer API (when embedder_source == gemini)
+    gemini_api_key: str
+    gemini_embedding_task_type: str  # empty = omit taskType; else e.g. RETRIEVAL_DOCUMENT
+    gemini_embedding_max_output_dimension: int
+    # Self-hosted embedding server (when embedder_source == self_hosted)
+    # URL of an OpenAI-compatible embedding server (e.g. HuggingFace TEI)
+    embedding_server_url: str
 
     # ── LangWatch ───────────────────────────────────────
     langwatch_enabled: bool
@@ -30,7 +41,9 @@ class Settings:
     langwatch_project: str
 
     # ── Pipeline tuning ──────────────────────────────────
+    # Max evaluator-triggered retries (extra search rounds after the first).
     max_search_iterations: int
+    # Per-query LLM spend cap (USD); cumulative + projected call estimates enforced in nodes.
     token_budget_usd: float
     reranker_top_n: int
     reranker_model: str
@@ -48,11 +61,27 @@ class Settings:
     dataset_file: str
     dataset_schema: str
 
+    # ── Real-time ingest (Meilisearch task wait ceiling) ───
+    ingest_sla_seconds: int
+
     # ── Latency / performance ──────────────────────────────
     # fast_mode skips LLM explanation generation in the reranker, reducing
     # end-to-end latency by ~400-800 ms at the cost of "Why this matches" text.
     # Use for latency-sensitive integrations; full AI path remains the default.
     fast_mode: bool
+    # If true, reranker explanations are generated out-of-band (non-blocking).
+    reranker_explain_async: bool
+    # Number of top reranked hits to explain (reduces tail latency/cost).
+    reranker_explain_top_k: int
+    # Tight timeout/retry policy for explanation calls (interactive UX).
+    reranker_explain_timeout_seconds: int
+    reranker_explain_max_retries: int
+    # Retrieval router policy: set false to use Python heuristic routing by default
+    # (faster and zero-token). LLM routing remains available when true.
+    router_use_llm: bool
+    # Startup warmup: preload local scanner/reranker models in background so the
+    # first user query avoids heavy cold-start latency.
+    warmup_models_on_start: bool
 
     # ── Kafka / Redpanda streaming ingest ─────────────────
     # Set kafka_enabled=true to activate the Kafka consumer path.
@@ -81,8 +110,17 @@ def get_settings() -> Settings:
         openai_api_key=os.getenv("OPENAI_API_KEY", ""),
         openai_model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
         # ── Embeddings ───────────────────────────────────────
-        embedding_model=os.getenv("EMBEDDING_MODEL", "google/embeddinggemma-300m"),
-        embedding_dimensions=int(os.getenv("EMBEDDING_DIMENSIONS", "768")),
+        embedder_source=os.getenv("EMBEDDER_SOURCE", "local").strip().lower(),
+        embedding_model=os.getenv("EMBEDDING_MODEL", "intfloat/multilingual-e5-large"),
+        embedding_dimensions=int(os.getenv("EMBEDDING_DIMENSIONS", "1024")),
+        gemini_api_key=(
+            os.getenv("GEMINI_API_KEY", "") or os.getenv("GOOGLE_API_KEY", "")
+        ).strip(),
+        gemini_embedding_task_type=os.getenv("GEMINI_EMBEDDING_TASK_TYPE", "").strip(),
+        gemini_embedding_max_output_dimension=int(
+            os.getenv("GEMINI_EMBEDDING_MAX_OUTPUT_DIMENSION", "3072")
+        ),
+        embedding_server_url=os.getenv("EMBEDDING_SERVER_URL", "http://localhost:8080").rstrip("/"),
         # ── LangWatch ───────────────────────────────────────
         langwatch_enabled=os.getenv("LANGWATCH_ENABLED", "false").lower() == "true",
         langwatch_api_key=os.getenv("LANGWATCH_API_KEY", ""),
@@ -105,8 +143,15 @@ def get_settings() -> Settings:
         # ── Dataset ─────────────────────────────────────────────
         dataset_file=os.getenv("DATASET_FILE", "data/movies.json"),
         dataset_schema=os.getenv("DATASET_SCHEMA", "movies"),
+        ingest_sla_seconds=int(os.getenv("INGEST_SLA_SECONDS", "300")),
         # ── Latency / performance ─────────────────────────────────
         fast_mode=os.getenv("FAST_MODE", "false").lower() == "true",
+        reranker_explain_async=os.getenv("RERANKER_EXPLAIN_ASYNC", "true").lower() == "true",
+        reranker_explain_top_k=int(os.getenv("RERANKER_EXPLAIN_TOP_K", "5")),
+        reranker_explain_timeout_seconds=int(os.getenv("RERANKER_EXPLAIN_TIMEOUT_SECONDS", "10")),
+        reranker_explain_max_retries=int(os.getenv("RERANKER_EXPLAIN_MAX_RETRIES", "0")),
+        router_use_llm=os.getenv("ROUTER_USE_LLM", "false").lower() == "true",
+        warmup_models_on_start=os.getenv("WARMUP_MODELS_ON_START", "true").lower() == "true",
         # ── Kafka / Redpanda streaming ingest ─────────────────────
         kafka_enabled=os.getenv("KAFKA_ENABLED", "false").lower() == "true",
         kafka_bootstrap_servers=os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092"),

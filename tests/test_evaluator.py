@@ -9,6 +9,7 @@ from src.nodes.evaluator import (
     _score_freshness_signal,
     _compute_quality_score,
     _build_retry_prescription,
+    _is_near_duplicate_variant,
     evaluator_node,
 )
 
@@ -106,7 +107,31 @@ def test_evaluator_retry(state_factory):
 
 
 def test_evaluator_exhausted(state_factory):
-    state = state_factory(iteration_count=2)
+    # After increment: iteration=4 ⇒ retries_so_far=3 ⇒ not < MAX_SEARCH_ITERATIONS (3)
+    state = state_factory(iteration_count=3)
     result = evaluator_node(state)
     assert result["evaluator_decision"] == "exhausted"
     assert any(e.get("message") == "ITERATION_LIMIT" for e in result["errors"])
+
+
+def test_evaluator_budget_exhausted(state_factory):
+    state = state_factory(cumulative_token_cost=0.02)
+    result = evaluator_node(state)
+    assert result["evaluator_decision"] == "exhausted"
+    assert any(e.get("message") == "BUDGET_EXCEEDED" for e in result["errors"])
+
+
+def test_near_duplicate_same_strategy_only():
+    hist = [
+        {"strategy": "HYBRID", "query_variant": "wireless earbuds pro max"},
+    ]
+    assert _is_near_duplicate_variant(
+        "wireless earbuds pro max",
+        "HYBRID",
+        hist,
+    )
+    assert not _is_near_duplicate_variant(
+        "wireless earbuds pro max",
+        "SEMANTIC",
+        hist,
+    )

@@ -12,13 +12,11 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from langgraph.graph import END, START, StateGraph
-from langchain_core.runnables.graph import MermaidDrawMethod
-
-from src.models.state import SearchStateDict
-
 
 def _build_topology_only_graph():
+    from langgraph.graph import END, START, StateGraph
+    from src.models.state import SearchStateDict
+
     graph = StateGraph(SearchStateDict)
 
     # Keep node names identical to production graph.
@@ -121,6 +119,8 @@ def _write_fallback_svg(path: Path) -> None:
 
 
 def main() -> None:
+    from langchain_core.runnables.graph import MermaidDrawMethod
+
     out_dir = Path("src/graph")
     out_dir.mkdir(parents=True, exist_ok=True)
 

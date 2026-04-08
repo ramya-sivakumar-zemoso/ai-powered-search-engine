@@ -33,26 +33,12 @@ from src.nodes.query_understander import query_understander_node
 from src.nodes.retrieval_router import retrieval_router_node
 from src.nodes.searcher import searcher_node
 from src.nodes.evaluator import evaluator_node
-from src.nodes.reranker import reranker_node
-from src.nodes.reporter import reporter_node
-from src.utils.langwatch_tracker import annotate_node_span
-from src.utils.logger import get_logger, log_node_exit
-from src.utils.config import get_settings
+from src.nodes.reranker import reranker_node, hydrate_async_explanations_in_state
+from src.nodes.reporter import reporter_node, assemble_final_response
+from src.utils.logger import get_logger
 from src.utils.state_display import state_delta
 
 logger = get_logger(__name__)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  NODES — all 6 implemented nodes are imported from src.nodes.*
-# ══════════════════════════════════════════════════════════════════════════════
-
-# query_understander_node — imported from src.nodes.query_understander
-# retrieval_router_node   — imported from src.nodes.retrieval_router
-# searcher_node           — imported from src.nodes.searcher
-# evaluator_node          — imported from src.nodes.evaluator
-# reranker_node           — imported from src.nodes.reranker
-# reporter_node           — imported from src.nodes.reporter
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -288,3 +274,11 @@ def run_search(query: str, session_id: str | None = None) -> dict:
     """
     final_state, _ = run_search_with_trace(query, session_id=session_id)
     return final_state
+
+
+def hydrate_async_explanations(final_state: dict) -> dict:
+    """Hydrate completed async reranker explanations and refresh final_response."""
+    updated = hydrate_async_explanations_in_state(final_state)
+    if isinstance(updated, dict):
+        updated["final_response"] = assemble_final_response(updated)
+    return updated
