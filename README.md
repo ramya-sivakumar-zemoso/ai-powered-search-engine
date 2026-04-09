@@ -48,6 +48,34 @@ python main.py --query "science fiction adventure"
 # or: streamlit run streamlit_app.py
 ```
 
+## Kaggle + ngrok (E5 server)
+
+To use `intfloat/multilingual-e5-large` from Kaggle as a self-hosted embedding
+endpoint:
+
+1. In Kaggle notebook, install: `sentence-transformers fastapi uvicorn pyngrok`
+2. Set `NGROK_AUTHTOKEN` as a Kaggle secret
+3. Run:
+
+```bash
+python scripts/kaggle_e5_ngrok_server.py --port 8080 --prefix-mode passage
+```
+
+Then set local `.env`:
+
+```bash
+EMBEDDER_SOURCE=self_hosted
+EMBEDDING_SERVER_URL=https://<ngrok-domain>
+EMBEDDING_MODEL=intfloat/multilingual-e5-large
+EMBEDDING_DIMENSIONS=1024
+```
+
+Re-index after switching model:
+
+```bash
+python -m src.tools.setup_index --reset --schema movies
+```
+
 ## Response flags
 
 Every pipeline response includes the following top-level flags for downstream monitoring:
