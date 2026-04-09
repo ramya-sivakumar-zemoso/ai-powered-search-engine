@@ -54,11 +54,11 @@ To use `intfloat/multilingual-e5-large` from Kaggle as a self-hosted embedding
 endpoint:
 
 1. In Kaggle notebook, install: `sentence-transformers fastapi uvicorn pyngrok`
-2. Set `NGROK_AUTHTOKEN` as a Kaggle secret
+2. Set `NGROK_AUTHTOKEN` (or `NGROK_AUTH_TOKEN`) as a Kaggle secret
 3. Run:
 
 ```bash
-python scripts/kaggle_e5_ngrok_server.py --port 8080 --prefix-mode passage
+python scripts/kaggle_e5_ngrok_server.py --port 8080 --prefix-mode passage --print-env
 ```
 
 Then set local `.env`:

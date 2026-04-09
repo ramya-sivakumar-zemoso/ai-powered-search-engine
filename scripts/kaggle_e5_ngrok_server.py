@@ -6,7 +6,7 @@ This script starts an OpenAI-compatible `/v1/embeddings` endpoint using
 Typical Kaggle usage:
 
 1) pip install sentence-transformers fastapi uvicorn pyngrok
-2) Set NGROK_AUTHTOKEN as a Kaggle secret (recommended)
+2) Set NGROK_AUTHTOKEN (or NGROK_AUTH_TOKEN) as a Kaggle secret (recommended)
 3) python scripts/kaggle_e5_ngrok_server.py --port 8080 --prefix-mode passage
 
 Then set local project `.env` values to point Meilisearch to the printed ngrok URL:
@@ -41,24 +41,28 @@ class EmbeddingsRequest(BaseModel):
 
 def _load_ngrok_token() -> str:
     """Load ngrok token from env or Kaggle secrets."""
-    token = (os.getenv("NGROK_AUTHTOKEN") or "").strip()
-    if token:
-        return token
+    env_keys = ("NGROK_AUTHTOKEN", "NGROK_AUTH_TOKEN")
+    for key in env_keys:
+        token = (os.getenv(key) or "").strip()
+        if token:
+            return token
 
     # Optional fallback for Kaggle notebooks using the secrets UI.
     try:
         from kaggle_secrets import UserSecretsClient  # type: ignore
 
-        token = UserSecretsClient().get_secret("NGROK_AUTHTOKEN") or ""
-        token = token.strip()
+        client = UserSecretsClient()
+        for key in env_keys:
+            token = (client.get_secret(key) or "").strip()
+            if token:
+                return token
     except Exception:
-        token = ""
+        pass
 
-    if not token:
-        raise RuntimeError(
-            "Missing NGROK_AUTHTOKEN. Set env var or Kaggle secret 'NGROK_AUTHTOKEN'."
-        )
-    return token
+    raise RuntimeError(
+        "Missing ngrok token. Set NGROK_AUTHTOKEN or NGROK_AUTH_TOKEN "
+        "(env var or Kaggle secret)."
+    )
 
 
 def _prefix_text(text: str, prefix_mode: str) -> str:
@@ -117,6 +121,11 @@ def parse_args() -> argparse.Namespace:
         default="cpu",
         help="SentenceTransformer device (cpu, cuda).",
     )
+    parser.add_argument(
+        "--print-env",
+        action="store_true",
+        help="Print .env lines for this ngrok endpoint and exit.",
+    )
     return parser.parse_args()
 
 
@@ -136,6 +145,12 @@ def main() -> None:
         "Use this in local .env: EMBEDDING_SERVER_URL=%s and EMBEDDER_SOURCE=self_hosted",
         public_url,
     )
+    if args.print_env:
+        print("\n# Copy to local .env")
+        print("EMBEDDER_SOURCE=self_hosted")
+        print(f"EMBEDDING_SERVER_URL={public_url}")
+        print(f"EMBEDDING_MODEL={args.model_id}")
+        print("EMBEDDING_DIMENSIONS=1024")
 
     uvicorn.run(app, host="0.0.0.0", port=args.port)
 
