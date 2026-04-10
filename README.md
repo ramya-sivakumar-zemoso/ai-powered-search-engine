@@ -1,6 +1,6 @@
 # AI-Powered Search Engine
 
-Hybrid search on **Meilisearch** (keyword + semantic) with **EmbeddingGemma** embeddings (`google/embeddinggemma-300m` via `EMBEDDING_MODEL`, 768 dims) on the index, and a **BGE** cross-encoder reranker (`BAAI/bge-reranker-v2-m3` via `RERANKER_MODEL`) in the pipeline.
+Hybrid search on **Meilisearch** (keyword + semantic) with **multilingual-e5-large** embeddings (`intfloat/multilingual-e5-large` via `EMBEDDING_MODEL`, 1024 dims, served via Kaggle + ngrok) on the index, and a **BGE** cross-encoder reranker (`BAAI/bge-reranker-v2-m3` via `RERANKER_MODEL`) in the pipeline.
 
 The codebase is **domain-agnostic**: movies, e-commerce, sports (and others) are configured by a **`DatasetSchema`** in `src/models/schema_registry.py`, selected with **`DATASET_SCHEMA`** in `.env`. Ingest maps raw columns → the shared internal document shape (`title`, `description`, `category`, `brand`, …) via **`FieldMapping`**. The pipeline (intent parsing, filters, retrieve fields, reranker text, Streamlit labels) reads that schema so behavior stays consistent across verticals.
 
