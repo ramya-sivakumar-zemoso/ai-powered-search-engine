@@ -28,6 +28,7 @@ from pydantic import BaseModel
 from pyngrok import conf, ngrok
 from sentence_transformers import SentenceTransformer
 import uvicorn
+from dotenv import load_dotenv
 
 logger = logging.getLogger("kaggle-e5-ngrok")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -41,6 +42,7 @@ class EmbeddingsRequest(BaseModel):
 
 def _load_ngrok_token() -> str:
     """Load ngrok token from env or Kaggle secrets."""
+    load_dotenv()
     env_keys = ("NGROK_AUTHTOKEN", "NGROK_AUTH_TOKEN")
     for key in env_keys:
         token = (os.getenv(key) or "").strip()
