@@ -306,7 +306,7 @@ File: `src/utils/injection_guard.py`
 | 4. Content boundaries | User query wrapped in `<user_query_boundary>` tags in human message only. Vendor document fields wrapped in `<vendor_listing_documents>` outer envelope + per-field `<doc_*>` tags. System prompt contains only static instructions. | Intent LLM + reranker LLM |
 | 5. Vendor field sanitization | Same heuristic stripping applied to vendor document fields before reranker prompt. Signature hits on vendor text logged with `source=vendor_listing_field` and `doc_id`. | reranker node |
 
-**Limitations :**
+**Limitations:**
 
 Natural-language injections that do not match regex patterns and evade the ML scanner remain an open class. No defense is 100%. The layered approach (sanitize → scan → delimit → audit citations → log for human review) reduces attack surface but does not eliminate it.
 

@@ -6,7 +6,7 @@ The codebase is **domain-agnostic**: movies, e-commerce, sports (and others) are
 
 **Architecture, PRD mapping, and trade-offs:** see **[DESIGN.md](DESIGN.md)**. **Trace correlation:** pass `--session-id` to `main.py` or use Streamlit (session id in app state); responses include `session_id` and `query_hash`.
 
-**Prompt-injection defenses** (query sanitisation, delimiter boundaries for user vs vendor text in human messages only, structured detection logs) are described in **[DESIGN.md §7](DESIGN.md#7-prompt-injection-prd-47)**.
+**Prompt-injection defenses** (query sanitisation, delimiter boundaries for user vs vendor text in human messages only, structured detection logs) are described in **[DESIGN.md §8](DESIGN.md#8-prompt-injection-defenses)**.
 
 ## Requirements
 
@@ -185,7 +185,7 @@ Every response includes `elapsed_seconds` and `sla_ok` for monitoring. The endpo
 | Fast mode (`FAST_MODE=true`) | ~1 100 ms | Skips LLM explanations; cross-encoder ranking still runs |
 | Meilisearch-only | ~80 ms | No AI enrichment; raw keyword/hybrid results |
 
-Every response includes `pipeline_latency_ms` for SLA tracking. See `DESIGN.md §13.1` for the full latency breakdown.
+Every response includes `pipeline_latency_ms` for SLA tracking. See `DESIGN.md §13` for the full latency breakdown.
 
 ## Graph diagram
 
