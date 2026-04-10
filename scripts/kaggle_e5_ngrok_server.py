@@ -3,11 +3,17 @@
 This script starts an OpenAI-compatible `/v1/embeddings` endpoint using
 `sentence-transformers` and exposes it publicly using ngrok.
 
+The server auto-detects CUDA GPUs and uses them by default. On a Kaggle T4
+with batch_size=64, expect ~200-500 docs/sec vs ~10 docs/sec on CPU.
+
 Typical Kaggle usage:
 
-1) pip install sentence-transformers fastapi uvicorn pyngrok
+1) pip install sentence-transformers fastapi uvicorn pyngrok torch
 2) Set NGROK_AUTHTOKEN (or NGROK_AUTH_TOKEN) as a Kaggle secret (recommended)
 3) python scripts/kaggle_e5_ngrok_server.py --port 8080 --prefix-mode passage
+
+GPU is auto-detected. Override with --device cpu/cuda. Tune throughput with
+--batch-size (default 64; increase to 128/256 if VRAM allows).
 
 Then set local project `.env` values to point Meilisearch to the printed ngrok URL:
   EMBEDDER_SOURCE=self_hosted
@@ -21,8 +27,10 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import time
 from typing import Any
 
+import torch
 from fastapi import FastAPI
 from pydantic import BaseModel
 from pyngrok import conf, ngrok
@@ -76,18 +84,42 @@ def _prefix_text(text: str, prefix_mode: str) -> str:
     return f"passage: {t}"
 
 
-def build_app(model: SentenceTransformer, model_id: str, prefix_mode: str) -> FastAPI:
+def build_app(
+    model: SentenceTransformer,
+    model_id: str,
+    prefix_mode: str,
+    batch_size: int,
+) -> FastAPI:
     app = FastAPI(title="Kaggle E5 Embedding Server", version="1.0.0")
 
     @app.get("/health")
     def health() -> dict[str, Any]:
-        return {"status": "ok", "model": model_id, "prefix_mode": prefix_mode}
+        return {
+            "status": "ok",
+            "model": model_id,
+            "prefix_mode": prefix_mode,
+            "device": str(model.device),
+            "batch_size": batch_size,
+        }
 
     @app.post("/v1/embeddings")
     def embeddings(body: EmbeddingsRequest) -> dict[str, Any]:
         texts = body.input if isinstance(body.input, list) else [body.input]
         prefixed = [_prefix_text(t, prefix_mode=prefix_mode) for t in texts]
-        vectors = model.encode(prefixed, normalize_embeddings=True)
+
+        t0 = time.perf_counter()
+        vectors = model.encode(
+            prefixed,
+            normalize_embeddings=True,
+            batch_size=batch_size,
+        )
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+        docs_per_sec = len(texts) / (elapsed_ms / 1000) if elapsed_ms > 0 else 0
+        logger.info(
+            "Encoded %d texts in %.1fms (%.1f docs/sec)",
+            len(texts), elapsed_ms, docs_per_sec,
+        )
+
         data = [
             {
                 "object": "embedding",
@@ -120,8 +152,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--device",
-        default="cpu",
-        help="SentenceTransformer device (cpu, cuda).",
+        default=None,
+        help="SentenceTransformer device. Auto-detects CUDA when omitted.",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=64,
+        help="Batch size for model.encode(). Higher = faster on GPU, more VRAM.",
     )
     parser.add_argument(
         "--print-env",
@@ -131,14 +169,50 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _resolve_device(requested: str | None) -> str:
+    """Return the best available device, preferring CUDA when available."""
+    if requested is not None:
+        return requested
+    if torch.cuda.is_available():
+        return "cuda"
+    return "cpu"
+
+
+def _log_device_info(device: str) -> None:
+    """Log hardware info so the operator can verify GPU is actually in use."""
+    if device == "cuda" and torch.cuda.is_available():
+        gpu_name = torch.cuda.get_device_name(0)
+        vram_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
+        logger.info("GPU detected: %s (%.1f GB VRAM)", gpu_name, vram_gb)
+    else:
+        import multiprocessing
+        logger.info(
+            "Running on CPU (%d cores). Pass --device cuda for GPU acceleration.",
+            multiprocessing.cpu_count(),
+        )
+
+
 def main() -> None:
     args = parse_args()
     token = _load_ngrok_token()
     conf.get_default().auth_token = token
 
-    logger.info("Loading model: %s on device=%s", args.model_id, args.device)
-    model = SentenceTransformer(args.model_id, device=args.device)
-    app = build_app(model=model, model_id=args.model_id, prefix_mode=args.prefix_mode)
+    device = _resolve_device(args.device)
+    _log_device_info(device)
+
+    logger.info("Loading model: %s on device=%s (batch_size=%d)", args.model_id, device, args.batch_size)
+    model = SentenceTransformer(args.model_id, device=device)
+
+    # Warm up the model with a dummy encode so the first real request isn't slow.
+    model.encode(["warmup"], batch_size=1)
+    logger.info("Model warm-up complete")
+
+    app = build_app(
+        model=model,
+        model_id=args.model_id,
+        prefix_mode=args.prefix_mode,
+        batch_size=args.batch_size,
+    )
 
     tunnel = ngrok.connect(addr=args.port, bind_tls=True)
     public_url = tunnel.public_url.rstrip("/")
