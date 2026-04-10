@@ -23,10 +23,7 @@ This document records what we built, why we made specific choices, where we devi
 13. [Latency: Honest Assessment](#13-latency-honest-assessment)
 14. [Cost Estimate](#14-cost-estimate)
 15. [PRD Critical Thinking Challenges (All 6)](#15-prd-critical-thinking-challenges-all-6)
-16. [PRD Requirements vs Our Own Additions](#16-prd-requirements-vs-our-own-additions)
-17. [Automatic Penalty Checklist](#17-automatic-penalty-checklist)
-18. [Known Limitations](#18-known-limitations)
-19. [Deliverables Checklist](#19-deliverables-checklist)
+16. [Known Limitations](#16-known-limitations)
 
 ---
 
@@ -309,7 +306,7 @@ File: `src/utils/injection_guard.py`
 | 4. Content boundaries | User query wrapped in `<user_query_boundary>` tags in human message only. Vendor document fields wrapped in `<vendor_listing_documents>` outer envelope + per-field `<doc_*>` tags. System prompt contains only static instructions. | Intent LLM + reranker LLM |
 | 5. Vendor field sanitization | Same heuristic stripping applied to vendor document fields before reranker prompt. Signature hits on vendor text logged with `source=vendor_listing_field` and `doc_id`. | reranker node |
 
-**Limitations (honest):**
+**Limitations :**
 
 Natural-language injections that do not match regex patterns and evade the ML scanner remain an open class. No defense is 100%. The layered approach (sanitize → scan → delimit → audit citations → log for human review) reduces attack surface but does not eliminate it.
 
@@ -544,60 +541,7 @@ The system never sacrifices the cross-encoder ranking for cost. The cross-encode
 
 ---
 
-## 16. PRD Requirements vs Our Own Additions
-
-### Required by PRD (implemented)
-
-| PRD section | Requirement | Implementation |
-|-------------|-------------|----------------|
-| §3 | LangGraph StateGraph, 6 nodes | `src/graph/graph.py` |
-| §4.1 | All 6 nodes fully functional | `src/nodes/*.py` |
-| §4.2 | Pydantic state models | `src/models/state.py` |
-| §4.3 | Freshness metadata in every response | `FreshnessReport`, `searcher._build_freshness_report()` |
-| §4.4 | Evaluator with quality signals + sensitivity analysis | `src/nodes/evaluator.py`, per-schema weights |
-| §4.5 | Loop prevention (iteration cap, budget, near-duplicate) | `evaluator_node`, `search_history` |
-| §4.6 | Citation integrity verification | `reranker._audit_citation()` |
-| §4.7 | Prompt injection defenses | `src/utils/injection_guard.py`, LLM Guard |
-| §5 | Observability (query_hash, session_id, LangWatch) | `graph.py`, `langwatch_tracker.py` |
-| §6 | Critical thinking challenges (all 6 documented) | This document §15 |
-| §7 | 5-minute ingest SLA | `ingest_api.py`, `kafka_consumer.py` |
-| §7 | Latency measurement | `pipeline_latency_ms` in every response |
-| §8 | Unit tests (8+ required) | `tests/` — 12 test files |
-| §8 | Graph diagram | `src/graph/architecture_diagram.svg`, Mermaid in this file |
-| §8 | DESIGN.md | This file |
-
-### Built on our own (not in PRD)
-
-| Feature | Why we added it | Files |
-|---------|----------------|-------|
-| Kafka/Redpanda streaming ingest | PRD mentions "real-time" but does not prescribe Kafka. We added it because HTTP push alone lacks replay, backpressure, and durable delivery. | `kafka_consumer.py`, `kafka_producer.py` |
-| Heuristic routing (`ROUTER_USE_LLM=false`) | Reduces latency and cost to zero for routing decisions. Same 6-rule logic as the LLM prompt. | `retrieval_router.py` |
-| `FAST_MODE` | PRD targets 200ms P95 which is unachievable with LLM calls. Fast mode gets closer (~1,100ms P95) by skipping explanations. | `config.py`, `reranker.py` |
-| Async explanations (`RERANKER_EXPLAIN_ASYNC`) | Returns search results immediately, generates explanations in background. Addresses perceived latency without sacrificing quality. | `rerank_async.py`, `reranker.py` |
-| Semantic degradation detection | If hybrid/semantic results have zero keyword overlap with query, falls back to keyword search. Catches degenerate embedder output. | `searcher.py` |
-| Filter relaxation | If filters produce zero results, retries without filters. Better than returning nothing. | `searcher.py` |
-| Cross-encoder offline fallback | If HuggingFace network call fails (SSL, proxy), retries with `local_files_only=True`. Works behind corporate firewalls. | `reranker.py` |
-| Model warmup on startup | Preloads injection scanner (~400MB) and cross-encoder (~1.1GB) in a background thread at startup. Eliminates cold-start latency on first query. | `model_warmup.py` |
-| Multi-domain schema system | PRD focuses on marketplace. We made it domain-agnostic with 4 schemas (movies, marketplace, ecommerce, sports) switchable via `.env`. | `schema_registry.py`, `dataset_schema.py` |
-| Vendor field injection scanning | PRD §4.7 focuses on user queries. We also scan vendor listing fields (title, description) for injection signatures before feeding them to the reranker LLM. | `injection_guard.py`, `reranker.py` |
-| Kaggle + ngrok embedding server | Self-hosted embedding endpoint to work around corporate SSL proxy issues with Meilisearch's built-in HuggingFace downloader. | `scripts/kaggle_e5_ngrok_server.py` |
-
----
-
-## 17. Automatic Penalty Checklist
-
-PRD §9 defines automatic penalties. Status of each:
-
-| Penalty condition | Status | Evidence |
-|-------------------|--------|----------|
-| Missing graph diagram | **CLEAR** | `src/graph/architecture_diagram.svg`, `src/graph/graph_programmatic.svg`, Mermaid diagram in this file |
-| No unit tests | **CLEAR** | `tests/` — 12 test files (test_evaluator, test_reranker, test_searcher, test_query_understander, test_routing, test_injection_guard, test_schema, test_reporter, test_gemini_meili_embedder, test_ingest_contract, test_utils, conftest) |
-| Hardcoded configuration | **CLEAR** | All config via `.env` + `src/utils/config.py` (Settings dataclass with env defaults). No hardcoded API keys, model names, thresholds, or URLs in node code. |
-| Missing DESIGN.md | **CLEAR** | This file |
-
----
-
-## 18. Known Limitations
+## 16. Known Limitations
 
 | Concern | What breaks | Mitigation direction |
 |---------|-------------|---------------------|
@@ -608,21 +552,3 @@ PRD §9 defines automatic penalties. Status of each:
 | Personalization | Not implemented | Track as roadmap; schema-driven interfaces support extension |
 | Translation | Not implemented | Track as roadmap; `language` field in IntentModel is parsed but not acted on |
 
----
-
-## 19. Deliverables Checklist
-
-| PRD item | Status | Location |
-|----------|--------|----------|
-| LangGraph 6 nodes | Done | `src/graph/graph.py` |
-| Meilisearch SDK + retries + hybrid fallback | Done | `src/tools/meilisearch_client.py` |
-| Real-time ingest (5-min SLA) | Done | `src/tools/ingest_api.py` + `kafka_consumer.py` |
-| Kafka streaming ingest | Done | `src/tools/kafka_producer.py`, `kafka_consumer.py` |
-| Latency instrumentation | Done | `pipeline_latency_ms` in `graph.py` |
-| Fast mode | Done | `FAST_MODE` in `config.py`, `reranker.py` |
-| Unit tests (8+ required) | Done (12 files) | `tests/` |
-| Graph diagram | Done | `src/graph/architecture_diagram.svg`, `graph_programmatic.svg` |
-| DESIGN.md | Done | This file |
-| Cost estimate | Done | §14 |
-| Sensitivity analysis | Done | §4 |
-| Critical thinking (all 6) | Done | §15 |
