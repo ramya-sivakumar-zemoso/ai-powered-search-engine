@@ -64,15 +64,20 @@ def route_after_query_understander(state: dict) -> str:
 def route_after_searcher(state: dict) -> str:
     """
     After searcher finishes:
-      - If hard failure (errors with severity ERROR) → go to reporter (skip evaluator)
-      - Otherwise → go to evaluator
+      - If hard failure (ERROR-severity error from the searcher node) → reporter
+      - Otherwise → evaluator
+
+    Intentionally scoped to errors whose node == "searcher" so that ERROR entries
+    from prior nodes (e.g. a future query_understander ERROR that bypassed the
+    injection short-circuit) do not incorrectly skip the evaluator.
     """
-    errors = state.get("errors", [])
-    for error in errors:
-        if isinstance(error, dict) and error.get("severity") == "ERROR":
-            return "reporter"
-        if hasattr(error, "severity") and str(error.severity) == "ERROR":
-            return "reporter"
+    for error in state.get("errors", []):
+        if isinstance(error, dict):
+            if error.get("node") == "searcher" and error.get("severity") == "ERROR":
+                return "reporter"
+        elif hasattr(error, "node") and hasattr(error, "severity"):
+            if str(error.node) == "searcher" and str(error.severity) == "ERROR":
+                return "reporter"
     return "evaluator"
 
 

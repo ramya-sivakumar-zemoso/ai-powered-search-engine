@@ -13,7 +13,7 @@ import re
 _LINE_START_INSTRUCTION = re.compile(
     r"(?i)^(system\s*:|assistant\s*:|user\s*:|"
     r"<\|im_start\|>|<\|im_end\|>|</s>|<s>|<INST>|"
-    r"ignore\s+(all\s+)?(previous|prior)\s+(instructions?|prompts?)|"
+    r"ignore\s+(all\s+)?(previous|prior)\s+(instructions?|prompts?|messages?)|"
     r"forget\s+all|disregard\s+(the\s+)?(above|instructions)|"
     r"override\s+instructions|you\s+must\s+always(\s+rank)?|"
     r"always\s+rank\s+this|do\s+not\s+follow|"
@@ -25,7 +25,7 @@ _INLINE_STRIP: list[tuple[str, re.Pattern[str]]] = [
     (
         "ignore_previous_instructions",
         re.compile(
-            r"(?i)\bignore\s+(all\s+)?(previous|prior)\s+instructions?\b[.,;:!]*\s*",
+            r"(?i)\bignore\s+(all\s+)?(previous|prior)\s+(instructions?|prompts?|messages?)\b[.,;:!]*\s*",
         ),
     ),
     (
@@ -54,7 +54,7 @@ _INLINE_STRIP: list[tuple[str, re.Pattern[str]]] = [
 
 # ── Signature patterns for logging (query or document hit) — names are stable for SIEM
 _SIGNATURE_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
-    ("sig_ignore_previous", re.compile(r"(?i)ignore\s+(all\s+)?(previous|prior)\s+instructions?")),
+    ("sig_ignore_previous", re.compile(r"(?i)ignore\s+(all\s+)?(previous|prior)\s+(instructions?|prompts?|messages?)")),
     ("sig_disregard", re.compile(r"(?i)disregard\s+(the\s+)?(above|instructions)")),
     ("sig_system_prompt", re.compile(r"(?i)(system\s*prompt|reveal\s+prompt|show\s+instructions)")),
     ("sig_role_escape", re.compile(r"(?i)\b(system\s*:|assistant\s*:|user\s*:)\s*\n?")),
@@ -170,12 +170,21 @@ def format_rerank_explanation_human_message(
 
 
 def get_effective_user_query(state: dict) -> str:
-    """Prefer sanitised query for retrieval/reranking after query_understander runs."""
+    """Prefer sanitised query for retrieval/reranking after query_understander runs.
+
+    Distinguishes two cases:
+      - sanitized_query is None  → key was never written (e.g. direct state init);
+                                   fall back to raw query.
+      - sanitized_query is ""    → heuristic stripped the entire input (full injection
+                                   pattern); return "" and never fall back to raw.
+    """
     sq = state.get("sanitized_query")
-    if isinstance(sq, str) and sq.strip():
+    if sq is None:
+        raw = state.get("query")
+        return (raw or "").strip() if isinstance(raw, str) else ""
+    if isinstance(sq, str):
         return sq.strip()
-    raw = state.get("query")
-    return (raw or "").strip() if isinstance(raw, str) else ""
+    return ""
 
 
 def log_injection_signature_hits(

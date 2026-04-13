@@ -12,6 +12,7 @@ from src.models.state import (
     ErrorSeverity,
 )
 from src.utils.config import get_settings
+from src.utils.injection_guard import sanitize_query_for_llm
 from src.utils.llm import get_llm, strip_markdown_fences, extract_token_usage
 from src.utils.logger import get_logger, log_node_exit
 from src.utils.langwatch_tracker import (
@@ -95,6 +96,38 @@ def _heuristic_route(
 #  LLM ROUTING — GPT applies the same rules with reasoning
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _sanitize_intent_fields(parsed_intent: dict) -> dict:
+    """Return a copy of parsed_intent with entities and filter values sanitised.
+
+    The intent dict was produced by the query_understander LLM which processed
+    an already-heuristically-cleaned query.  A residual injection fragment could
+    still survive inside entity strings or filter values if the LLM echoed part
+    of a cleverly-crafted input.  Stripping them here prevents a second-hop
+    injection when the routing LLM reads these values in the HumanMessage.
+    """
+    raw_entities: list = parsed_intent.get("entities", []) or []
+    safe_entities = [
+        sanitize_query_for_llm(str(e))[0].strip()
+        for e in raw_entities
+        if e
+    ]
+    safe_entities = [e for e in safe_entities if e]
+
+    raw_filters: dict = parsed_intent.get("filters", {}) or {}
+    safe_filters = {
+        k: sanitize_query_for_llm(str(v))[0].strip()
+        for k, v in raw_filters.items()
+    }
+
+    return {
+        "type": parsed_intent.get("type", "INFORMATIONAL"),
+        "entities": safe_entities,
+        "filters": safe_filters,
+        "ambiguity_score": parsed_intent.get("ambiguity_score", 0.5),
+        "language": parsed_intent.get("language", "en"),
+    }
+
+
 def _route_with_llm(
     parsed_intent: dict,
     retry_prescription: dict | None,
@@ -113,12 +146,13 @@ def _route_with_llm(
     """
     llm = get_llm()
 
+    safe_intent = _sanitize_intent_fields(parsed_intent)
     user_content = json.dumps({
-        "intent_type": parsed_intent.get("type", "INFORMATIONAL"),
-        "ambiguity_score": parsed_intent.get("ambiguity_score", 0.5),
-        "entities": parsed_intent.get("entities", []),
-        "filters": parsed_intent.get("filters", {}),
-        "language": parsed_intent.get("language", "en"),
+        "intent_type": safe_intent["type"],
+        "ambiguity_score": safe_intent["ambiguity_score"],
+        "entities": safe_intent["entities"],
+        "filters": safe_intent["filters"],
+        "language": safe_intent["language"],
     }, indent=2)
 
     if retry_prescription:

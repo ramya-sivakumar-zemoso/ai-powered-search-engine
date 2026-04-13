@@ -178,12 +178,14 @@ def query_understander_node(state: dict) -> dict:
 
     Flow:
       Step 1: Generate a unique query hash (for traceability — PRD Section 5)
-      Step 2: Scan query for prompt injection (LLM Guard — PRD Section 4.7)
-      Step 3: If injection → write error to state and return (hard exit)
-      Step 4: If safe → call GPT-4o-mini to parse intent (PRD Section 4.1)
-      Step 5: Record token usage for budget tracking (PRD Section 4.5)
-      Step 6: Add sanitized query to search_history (PRD Section 4.5)
-      Step 7: Log structured node exit (PRD Section 5: Observability)
+      Step 1b: Heuristic sanitisation (strip instruction-like lines/phrases)
+      Step 2: Hard-block if heuristic stripped the entire query (full injection)
+      Step 3: Scan sanitised query with LLM Guard ML model (PRD Section 4.7)
+      Step 4: If injection → write error to state and return (hard exit)
+      Step 5: If safe → call GPT-4o-mini to parse intent (PRD Section 4.1)
+      Step 6: Record token usage for budget tracking (PRD Section 4.5)
+      Step 7: Add sanitized query to search_history (PRD Section 4.5)
+      Step 8: Log structured node exit (PRD Section 5: Observability)
 
     Args:
         state: The pipeline state dict (contains "query" at minimum).
@@ -227,10 +229,49 @@ def query_understander_node(state: dict) -> dict:
             },
         )
 
-    # ── Step 2: Scan sanitised query (LLM Guard) ─────────────────────────────
+    # ── Step 2: Hard-block when heuristic stripped the entire query ──────────
+    # If the original input was non-empty but sanitization reduced it to "",
+    # the whole query consisted of injection-like instructions.  Treat this
+    # as a definitive block rather than letting an empty string sail through
+    # LLM Guard (which scores "" as safe) and then falling back to the raw text.
+    if query.strip() and not sanitized_query:
+        log_injection_detection(
+            logger, "user_query", None, "full_instruction_strip", 1.0,
+        )
+
+        new_errors.append(
+            ExtractionError(
+                node="query_understander",
+                severity=ErrorSeverity.ERROR,
+                message="INJECTION_DETECTED",
+                fallback_applied=True,
+                fallback_description=(
+                    "Query blocked — heuristic sanitisation removed the entire input, "
+                    "indicating the query consisted solely of instruction-injection patterns."
+                ),
+            ).model_dump()
+        )
+
+        duration_ms = (time.perf_counter() - start) * 1000
+        log_node_exit(
+            logger, "query_understander", query_hash,
+            0, "BLOCKED", duration_ms, 0.0,
+        )
+        annotate_node_span(
+            "query_understander", 0, "BLOCKED", duration_ms,
+            extra={"injection_risk": 1.0},
+        )
+
+        # Write sanitized_query="" so get_effective_user_query never falls back
+        # to the raw injection text in any downstream node that might be reached.
+        updates["sanitized_query"] = ""
+        updates["errors"] = new_errors
+        return updates
+
+    # ── Step 3: Scan sanitised query (LLM Guard) ─────────────────────────────
     is_safe, risk_score = _scan_for_injection(sanitized_query)
 
-    # ── Step 3: If injection detected → hard exit to reporter ────────────────
+    # ── Step 4: If injection detected → hard exit to reporter ────────────────
     if not is_safe:
         log_injection_detection(
             logger, "user_query", None, "prompt_injection", risk_score,
@@ -264,7 +305,7 @@ def query_understander_node(state: dict) -> dict:
 
     updates["sanitized_query"] = sanitized_query
 
-    # ── Step 4: Parse intent with GPT-4o-mini ────────────────────────────────
+    # ── Step 5: Parse intent with GPT-4o-mini ────────────────────────────────
     cost_usd = 0.0
 
     try:
@@ -286,7 +327,7 @@ def query_understander_node(state: dict) -> dict:
         )
         updates["parsed_intent"] = intent.model_dump()
 
-        # ── Step 5: Record token usage ───────────────────────────────────────
+        # ── Step 6: Record token usage ───────────────────────────────────────
         cost_usd = (prompt_tokens * 0.000000150) + (completion_tokens * 0.000000600)
 
         new_token_usage.append(
@@ -302,7 +343,7 @@ def query_understander_node(state: dict) -> dict:
             state.get("cumulative_token_cost", 0.0) + cost_usd, 8
         )
 
-        # ── Step 6: Add sanitized query to search_history ────────────────────
+        # ── Step 7: Add sanitized query to search_history ────────────────────
         sanitized_variant = (
             " ".join(intent.entities) if intent.entities else sanitized_query
         )
@@ -358,7 +399,7 @@ def query_understander_node(state: dict) -> dict:
             ).model_dump()
         )
 
-    # ── Step 7: Log and annotate node exit ────────────────────────────────────
+    # ── Step 8: Log and annotate node exit ────────────────────────────────────
     duration_ms = (time.perf_counter() - start) * 1000
     strategy = state.get("retrieval_strategy", "HYBRID")
 

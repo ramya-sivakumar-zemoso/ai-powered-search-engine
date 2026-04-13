@@ -494,7 +494,7 @@ def reranker_node(state: dict) -> dict:
     """
     start = time.perf_counter()
     query_hash = state.get("query_hash", "")
-    query = get_effective_user_query(state) or (state.get("query", "") or "")
+    query = get_effective_user_query(state)
     results = state.get("search_results", [])
     strategy = state.get("retrieval_strategy", "HYBRID")
 
