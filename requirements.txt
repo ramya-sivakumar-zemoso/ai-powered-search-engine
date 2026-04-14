@@ -37,6 +37,31 @@ pytest-cov==6.0.0
 # UI
 streamlit==1.55.0
 
+# Optional — LangGraph checkpoint persistence (install the backend you need)
+# Enables crash recovery: a mid-pipeline failure resumes from the last
+# completed node when the same session_id is re-used.
+#
+# SQLite  (zero extra services; recommended for local / single-process):
+#   pip install langgraph-checkpoint-sqlite
+#   Or: pip install -e ".[checkpoint-sqlite]"
+#   .env: CHECKPOINTER_TYPE=sqlite  (default)
+#         CHECKPOINTER_SQLITE_PATH=checkpoints.db
+#
+# PostgreSQL (shared, multi-process, production):
+#   pip install langgraph-checkpoint-postgres
+#   Or: pip install -e ".[checkpoint-postgres]"
+#   .env: CHECKPOINTER_TYPE=postgres
+#         CHECKPOINTER_POSTGRES_URL=postgresql://user:pass@host:5432/dbname
+#
+# In-memory (no install needed; state lost on restart — good for testing):
+#   .env: CHECKPOINTER_TYPE=memory
+#
+# Disable entirely (pre-checkpointer behaviour):
+#   .env: CHECKPOINTER_TYPE=none
+#
+# Without either package, the pipeline falls back to MemorySaver automatically
+# and logs: checkpointer_fallback + fix hint.
+
 # Optional — real-time ingest (install when using Kafka or FastAPI ingest API)
 # pip install confluent-kafka fastapi "uvicorn[standard]"
 # Or: pip install -e ".[streaming]"

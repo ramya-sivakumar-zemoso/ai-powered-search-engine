@@ -55,6 +55,15 @@ streaming = [
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.30.0",
 ]
+# LangGraph checkpoint persistence backends (choose one or both).
+# SQLite — zero extra services, good for local / single-process deployments.
+checkpoint-sqlite = [
+    "langgraph-checkpoint-sqlite>=2.0.0",
+]
+# PostgreSQL — shared, multi-process safe; requires a running Postgres instance.
+checkpoint-postgres = [
+    "langgraph-checkpoint-postgres>=2.0.0",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]

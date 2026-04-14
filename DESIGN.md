@@ -548,7 +548,7 @@ The system never sacrifices the cross-encoder ranking for cost. The cross-encode
 | ~10M documents | Single Meilisearch index latency, reindex time | Sharding, category-specific indexes, tiered embedders |
 | ~10k concurrent queries | Python GIL, sync LLM calls, Meilisearch QPS | Horizontal app replicas, async responses, intent caching |
 | 200ms P95 with full AI | Consistently exceeded (~2,700ms P95) | See §13 — two-mode architecture, async explanations, GPU cross-encoder |
-| Crash mid-pipeline | No LangGraph checkpointer | Add Redis/Postgres checkpointer to resume from last node state |
+| Crash mid-pipeline | Checkpointer persists state after each node; re-invoke with the same `session_id` to resume. | Implemented — `src/utils/checkpointer.py`; SQLite default, Postgres via `CHECKPOINTER_TYPE=postgres` |
 | Personalization | Not implemented | Track as roadmap; schema-driven interfaces support extension |
 | Translation | Not implemented | Track as roadmap; `language` field in IntentModel is parsed but not acted on |
 

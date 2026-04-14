@@ -10,16 +10,80 @@ The codebase is **domain-agnostic**: movies, e-commerce, sports (and others) are
 
 ## Requirements
 
-- Python 3.10+ (see `pyproject.toml`; 3.12+ recommended)
-- Meilisearch (see `.env.example` for `MEILI_*` vars)
+### Core (always required)
+
+| Requirement | Version | Notes |
+|---|---|---|
+| Python | 3.10+ (3.12+ recommended) | |
+| Meilisearch | any recent | Local binary or Docker — see `MEILI_*` in `.env.example` |
+| OpenAI API key | — | Used by intent parser and reranker explanation nodes |
+| `langgraph` | 1.0.9 | Pinned in `requirements.txt` |
+| `sentence-transformers` | 3.3.1 | Cross-encoder reranker (`BAAI/bge-reranker-v2-m3`) |
+| `torch` | 2.3.1 | Required by `sentence-transformers` |
+| `llm-guard` | 0.3.14 | Prompt-injection scanner (deberta-v3-base) |
+| `pydantic` | 2.10.3 | State schema and node data contracts |
+| `langwatch` | 0.13.0 | Observability / trace correlation |
+
+Install all core dependencies at once:
+
+```bash
+pip install -r requirements.txt
+# or
+pip install -e .
+```
+
+### Optional — LangGraph checkpointer (crash recovery)
+
+Persists graph state after every node so a mid-pipeline crash can resume from
+the last completed node when the same `session_id` is re-used.
+
+| Backend | Install | When to use |
+|---|---|---|
+| **SQLite** (default) | `pip install langgraph-checkpoint-sqlite` | Local / single-process; zero extra services |
+| **PostgreSQL** | `pip install langgraph-checkpoint-postgres` | Multi-process / production; requires a running Postgres |
+| **Memory** | _(no install)_ | Testing; state is lost on process restart |
+| **None** | _(no install)_ | Disables checkpointing entirely |
+
+```bash
+# SQLite (recommended for most deployments)
+pip install langgraph-checkpoint-sqlite
+# or via extras
+pip install -e ".[checkpoint-sqlite]"
+
+# PostgreSQL
+pip install langgraph-checkpoint-postgres
+# or via extras
+pip install -e ".[checkpoint-postgres]"
+```
+
+Configure in `.env`:
+
+```env
+CHECKPOINTER_TYPE=sqlite          # sqlite | postgres | memory | none
+CHECKPOINTER_SQLITE_PATH=checkpoints.db
+CHECKPOINTER_POSTGRES_URL=postgresql://user:pass@host:5432/dbname
+```
+
+> Without either package installed the pipeline automatically falls back to
+> `MemorySaver` (in-memory) and logs a `checkpointer_fallback` warning with a
+> `fix` hint pointing to the correct `pip install` command.
+
+### Optional — Streaming ingest (Kafka / FastAPI)
+
+```bash
+pip install confluent-kafka fastapi "uvicorn[standard]"
+# or
+pip install -e ".[streaming]"
+```
 
 ## Setup
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt   # or: pip install -e .
-cp .env.example .env                # then edit secrets
+pip install -r requirements.txt   # core deps
+pip install langgraph-checkpoint-sqlite   # add for persistent crash recovery
+cp .env.example .env              # then edit secrets
 ```
 
 Start Meilisearch (example):
