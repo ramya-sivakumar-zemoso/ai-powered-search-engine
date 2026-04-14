@@ -6,7 +6,10 @@ from dotenv import load_dotenv
 from dataclasses import dataclass
 from functools import lru_cache
 
+import src.constants as C
+
 load_dotenv()
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -15,25 +18,15 @@ class Settings:
     meili_master_key: str
     meili_index_name: str
     meili_embedder_name: str
-    
+
     # ── OpenAI ───────────────────────────────────────────
     openai_api_key: str
     openai_model: str
 
-    # ── Embeddings (Meilisearch embedder in setup_index) ──
-    # embedder_source: local | openai | gemini | self_hosted
-    # gemini: Gemini Developer API (batchEmbedContents + x-goog-api-key), see gemini_meili_embedder.py.
-    # self_hosted: OpenAI-compatible embedding server (e.g. HuggingFace TEI).
-    embedder_source: str
+    # ── Embeddings (Meilisearch built-in huggingFace embedder in setup_index) ──
+    # Model Hugging Face id and vector size must match the index (re-index after changes).
     embedding_model: str
     embedding_dimensions: int
-    # Gemini Developer API (when embedder_source == gemini)
-    gemini_api_key: str
-    gemini_embedding_task_type: str  # empty = omit taskType; else e.g. RETRIEVAL_DOCUMENT
-    gemini_embedding_max_output_dimension: int
-    # Self-hosted embedding server (when embedder_source == self_hosted)
-    # URL of an OpenAI-compatible embedding server (e.g. HuggingFace TEI)
-    embedding_server_url: str
 
     # ── LangWatch ───────────────────────────────────────
     langwatch_enabled: bool
@@ -52,7 +45,7 @@ class Settings:
 
     # ── Injection detection ──────────────────────────────
     injection_scan_threshold: float
-    
+
     # ── Freshness thresholds ─────────────────────────────
     freshness_threshold_seconds: int
     staleness_threshold_seconds: int
@@ -102,65 +95,93 @@ class Settings:
 def get_settings() -> Settings:
     return Settings(
         # ── Meilisearch ──────────────────────────────────────
-        meili_url=os.getenv("MEILI_URL", "http://127.0.0.1:7700"),
-        meili_master_key=os.getenv("MEILI_MASTER_KEY", "aSampleMasterKey"),
-        meili_index_name=os.getenv("MEILI_INDEX_NAME", "movies"),
-        meili_embedder_name=os.getenv("MEILI_EMBEDDER_NAME", "default"),
+        meili_url=os.getenv("MEILI_URL", C.DEFAULT_MEILI_URL),
+        meili_master_key=os.getenv("MEILI_MASTER_KEY", C.DEFAULT_MEILI_MASTER_KEY),
+        meili_index_name=os.getenv("MEILI_INDEX_NAME", C.DEFAULT_MEILI_INDEX_NAME),
+        meili_embedder_name=os.getenv("MEILI_EMBEDDER_NAME", C.DEFAULT_MEILI_EMBEDDER_NAME),
         # ── OpenAI ───────────────────────────────────────────
         openai_api_key=os.getenv("OPENAI_API_KEY", ""),
-        openai_model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+        openai_model=os.getenv("OPENAI_MODEL", C.DEFAULT_OPENAI_MODEL),
         # ── Embeddings ───────────────────────────────────────
-        embedder_source=os.getenv("EMBEDDER_SOURCE", "local").strip().lower(),
-        embedding_model=os.getenv("EMBEDDING_MODEL", "intfloat/multilingual-e5-large"),
-        embedding_dimensions=int(os.getenv("EMBEDDING_DIMENSIONS", "1024")),
-        gemini_api_key=(
-            os.getenv("GEMINI_API_KEY", "") or os.getenv("GOOGLE_API_KEY", "")
-        ).strip(),
-        gemini_embedding_task_type=os.getenv("GEMINI_EMBEDDING_TASK_TYPE", "").strip(),
-        gemini_embedding_max_output_dimension=int(
-            os.getenv("GEMINI_EMBEDDING_MAX_OUTPUT_DIMENSION", "3072")
+        embedding_model=os.getenv("EMBEDDING_MODEL", C.DEFAULT_EMBEDDING_MODEL),
+        # Must match the chosen EMBEDDING_MODEL (e.g. 384 for default MiniLM).
+        embedding_dimensions=int(
+            os.getenv("EMBEDDING_DIMENSIONS", str(C.DEFAULT_EMBEDDING_DIMENSIONS)),
         ),
-        embedding_server_url=os.getenv("EMBEDDING_SERVER_URL", "http://localhost:8080").rstrip("/"),
         # ── LangWatch ───────────────────────────────────────
         langwatch_enabled=os.getenv("LANGWATCH_ENABLED", "false").lower() == "true",
         langwatch_api_key=os.getenv("LANGWATCH_API_KEY", ""),
-        langwatch_project=os.getenv("LANGWATCH_PROJECT", "novamart-search"),
+        langwatch_project=os.getenv("LANGWATCH_PROJECT", C.DEFAULT_LANGWATCH_PROJECT),
         # ── Pipeline tuning ──────────────────────────────────
-        max_search_iterations=int(os.getenv("MAX_SEARCH_ITERATIONS", "3")),
-        token_budget_usd=float(os.getenv("TOKEN_BUDGET_USD", "0.02")),
-        reranker_top_n=int(os.getenv("RERANKER_TOP_N", "10")),
-        reranker_model=os.getenv(
-            "RERANKER_MODEL",
-            "BAAI/bge-reranker-v2-m3",
+        max_search_iterations=int(
+            os.getenv("MAX_SEARCH_ITERATIONS", str(C.DEFAULT_MAX_SEARCH_ITERATIONS)),
         ),
-        confidence_threshold_degraded=float(os.getenv("CONFIDENCE_THRESHOLD_DEGRADED", "0.30")),
-        near_duplicate_threshold=float(os.getenv("NEAR_DUPLICATE_THRESHOLD", "0.92")),
+        token_budget_usd=float(os.getenv("TOKEN_BUDGET_USD", str(C.DEFAULT_TOKEN_BUDGET_USD))),
+        reranker_top_n=int(os.getenv("RERANKER_TOP_N", str(C.DEFAULT_RERANKER_TOP_N))),
+        reranker_model=os.getenv("RERANKER_MODEL", C.DEFAULT_RERANKER_MODEL),
+        confidence_threshold_degraded=float(
+            os.getenv(
+                "CONFIDENCE_THRESHOLD_DEGRADED",
+                str(C.DEFAULT_CONFIDENCE_THRESHOLD_DEGRADED),
+            ),
+        ),
+        near_duplicate_threshold=float(
+            os.getenv("NEAR_DUPLICATE_THRESHOLD", str(C.DEFAULT_NEAR_DUPLICATE_THRESHOLD)),
+        ),
         # ── Injection detection ──────────────────────────────
-        injection_scan_threshold=float(os.getenv("INJECTION_SCAN_THRESHOLD", "0.85")),
+        injection_scan_threshold=float(
+            os.getenv("INJECTION_SCAN_THRESHOLD", str(C.DEFAULT_INJECTION_SCAN_THRESHOLD)),
+        ),
         # ── Freshness thresholds ─────────────────────────────
-        freshness_threshold_seconds=int(os.getenv("FRESHNESS_THRESHOLD_SECONDS", "300")),
-        staleness_threshold_seconds=int(os.getenv("STALENESS_THRESHOLD_SECONDS", "3600")),
+        freshness_threshold_seconds=int(
+            os.getenv("FRESHNESS_THRESHOLD_SECONDS", str(C.DEFAULT_FRESHNESS_THRESHOLD_SECONDS)),
+        ),
+        staleness_threshold_seconds=int(
+            os.getenv("STALENESS_THRESHOLD_SECONDS", str(C.DEFAULT_STALENESS_THRESHOLD_SECONDS)),
+        ),
         # ── Dataset ─────────────────────────────────────────────
-        dataset_file=os.getenv("DATASET_FILE", "data/movies.json"),
-        dataset_schema=os.getenv("DATASET_SCHEMA", "movies"),
-        ingest_sla_seconds=int(os.getenv("INGEST_SLA_SECONDS", "300")),
+        dataset_file=os.getenv("DATASET_FILE", C.DEFAULT_DATASET_FILE),
+        dataset_schema=os.getenv("DATASET_SCHEMA", C.DEFAULT_DATASET_SCHEMA),
+        ingest_sla_seconds=int(os.getenv("INGEST_SLA_SECONDS", str(C.DEFAULT_INGEST_SLA_SECONDS))),
         # ── Latency / performance ─────────────────────────────────
         fast_mode=os.getenv("FAST_MODE", "false").lower() == "true",
         reranker_explain_async=os.getenv("RERANKER_EXPLAIN_ASYNC", "true").lower() == "true",
-        reranker_explain_top_k=int(os.getenv("RERANKER_EXPLAIN_TOP_K", "5")),
-        reranker_explain_timeout_seconds=int(os.getenv("RERANKER_EXPLAIN_TIMEOUT_SECONDS", "10")),
-        reranker_explain_max_retries=int(os.getenv("RERANKER_EXPLAIN_MAX_RETRIES", "0")),
+        reranker_explain_top_k=int(
+            os.getenv("RERANKER_EXPLAIN_TOP_K", str(C.DEFAULT_RERANKER_EXPLAIN_TOP_K)),
+        ),
+        reranker_explain_timeout_seconds=int(
+            os.getenv(
+                "RERANKER_EXPLAIN_TIMEOUT_SECONDS",
+                str(C.DEFAULT_RERANKER_EXPLAIN_TIMEOUT_SECONDS),
+            ),
+        ),
+        reranker_explain_max_retries=int(
+            os.getenv(
+                "RERANKER_EXPLAIN_MAX_RETRIES",
+                str(C.DEFAULT_RERANKER_EXPLAIN_MAX_RETRIES),
+            ),
+        ),
         router_use_llm=os.getenv("ROUTER_USE_LLM", "false").lower() == "true",
         warmup_models_on_start=os.getenv("WARMUP_MODELS_ON_START", "true").lower() == "true",
         # ── Kafka / Redpanda streaming ingest ─────────────────────
         kafka_enabled=os.getenv("KAFKA_ENABLED", "false").lower() == "true",
-        kafka_bootstrap_servers=os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092"),
-        kafka_topic=os.getenv("KAFKA_TOPIC", "search-ingest"),
-        kafka_consumer_group=os.getenv("KAFKA_CONSUMER_GROUP", "search-engine-consumer"),
-        kafka_security_protocol=os.getenv("KAFKA_SECURITY_PROTOCOL", "PLAINTEXT"),
-        kafka_sasl_mechanism=os.getenv("KAFKA_SASL_MECHANISM", "PLAIN"),
+        kafka_bootstrap_servers=os.getenv(
+            "KAFKA_BOOTSTRAP_SERVERS",
+            C.DEFAULT_KAFKA_BOOTSTRAP_SERVERS,
+        ),
+        kafka_topic=os.getenv("KAFKA_TOPIC", C.DEFAULT_KAFKA_TOPIC),
+        kafka_consumer_group=os.getenv(
+            "KAFKA_CONSUMER_GROUP",
+            C.DEFAULT_KAFKA_CONSUMER_GROUP,
+        ),
+        kafka_security_protocol=os.getenv(
+            "KAFKA_SECURITY_PROTOCOL",
+            C.DEFAULT_KAFKA_SECURITY_PROTOCOL,
+        ),
+        kafka_sasl_mechanism=os.getenv("KAFKA_SASL_MECHANISM", C.DEFAULT_KAFKA_SASL_MECHANISM),
         kafka_sasl_username=os.getenv("KAFKA_SASL_USERNAME", ""),
         kafka_sasl_password=os.getenv("KAFKA_SASL_PASSWORD", ""),
-        kafka_max_poll_records=int(os.getenv("KAFKA_MAX_POLL_RECORDS", "10")),
+        kafka_max_poll_records=int(
+            os.getenv("KAFKA_MAX_POLL_RECORDS", str(C.DEFAULT_KAFKA_MAX_POLL_RECORDS)),
+        ),
     )
-    

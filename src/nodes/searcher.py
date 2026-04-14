@@ -11,6 +11,8 @@ What this node does:
   7. If zero results with filters → retries WITHOUT filters (filter relaxation)
   8. If Meilisearch is completely down → writes ERROR to state (graph skips to reporter)
 
+Uses ``MEILI_INDEX_NAME`` from settings for the target index.
+
 No LLM call here → zero token cost.
 """
 from __future__ import annotations
@@ -18,6 +20,7 @@ from __future__ import annotations
 import time
 from datetime import datetime, timezone
 
+import src.constants as C
 from src.models.state import (
     SearchResult,
     FreshnessReport,
@@ -38,43 +41,22 @@ from src.utils.langwatch_tracker import annotate_node_span
 logger = get_logger(__name__)
 settings = get_settings()
 
-_BASE_STOP_WORDS = frozenset({
-    "the", "a", "an", "and", "or", "in", "of", "to", "for", "with", "is",
-    "on", "at", "by", "from", "this", "that", "it", "as", "are", "was",
-    "be", "has", "had", "not", "but", "all", "can", "her", "his", "one",
-    "our", "out", "you", "its", "my", "we", "do", "no", "so", "up", "if",
-    "me", "what", "about", "which", "when", "how", "who", "where", "why",
-})
-
 
 def _stop_words_for(schema) -> frozenset:
     extra = {w.lower() for w in schema.query_stop_words_extra}
-    return frozenset(_BASE_STOP_WORDS | extra)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  HELPER: Keyword overlap check (semantic degradation detector)
-# ══════════════════════════════════════════════════════════════════════════════
-
-_OVERLAP_MIN_RATIO = 0.5
-_STEM_LEN = 5
+    return frozenset(C.BASE_QUERY_STOP_WORDS | extra)
 
 
 def _query_stems(query: str, stop_words: frozenset) -> set[str]:
-    """Extract query words and their root stems for fuzzy substring matching.
-
-    For each word, we emit both the full word and a short stem (first 5 chars).
-    The stem handles morphological variants: "pirates"→"pirat" matches "pirate",
-    "romantic"→"roman" matches "romance", "dramatic"→"drama" matches "drama".
-    """
+    """Extract query words and their root stems for fuzzy substring matching."""
     stems: set[str] = set()
     for w in query.split():
         w = w.lower()
         if len(w) < 3 or w in stop_words:
             continue
         stems.add(w)
-        if len(w) > _STEM_LEN:
-            stems.add(w[:_STEM_LEN])
+        if len(w) > C.KEYWORD_STEM_LEN:
+            stems.add(w[: C.KEYWORD_STEM_LEN])
     return stems
 
 
@@ -83,18 +65,10 @@ def _has_keyword_overlap(
     hits: list[dict],
     overlap_fields: list[str],
     stop_words: frozenset,
-    top_n: int = 5,
+    top_n: int | None = None,
 ) -> bool:
-    """Check whether enough of the top hits contain significant query keywords.
-
-    Returns True only when at least ``_OVERLAP_MIN_RATIO`` (50 %) of the top-N
-    results contain a query keyword (or its stem) in the configured overlap
-    fields. Returns True when there are no significant keywords to check.
-
-    A single hit matching out of five (20 %) is NOT enough — that pattern
-    indicates the embedder placed one genuine result among garbage and the
-    keyword fallback should still fire.
-    """
+    """Check whether enough of the top hits contain significant query keywords."""
+    top_n = top_n if top_n is not None else C.KEYWORD_OVERLAP_TOP_N
     stems = _query_stems(query, stop_words)
 
     if not stems:
@@ -112,30 +86,11 @@ def _has_keyword_overlap(
         if any(stem in text for stem in stems):
             matches += 1
 
-    return (matches / len(checked)) >= _OVERLAP_MIN_RATIO
+    return (matches / len(checked)) >= C.KEYWORD_OVERLAP_MIN_RATIO
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  HELPER: Build filter string for Meilisearch
-# ══════════════════════════════════════════════════════════════════════════════
 
 def _build_filter_string(intent_filters: dict, schema) -> str | None:
-    """
-    Converts parsed_intent.filters dict into a Meilisearch filter string.
-
-    Example:
-        {"genre": "Action", "year": "2020"}
-        → 'category = "Action"' when genre aliases to category and year is not filterable
-
-    Meilisearch filter docs: https://www.meilisearch.com/docs/learn/filtering_and_sorting/filter_expression
-
-    Args:
-        intent_filters: The filters dict from parsed_intent.
-        schema: Active ``DatasetSchema`` (filterable fields + LLM aliases).
-
-    Returns:
-        A Meilisearch filter string, or None if no valid filters found.
-    """
+    """Converts parsed_intent.filters dict into a Meilisearch filter string."""
     if not intent_filters:
         return None
 
@@ -155,24 +110,8 @@ def _build_filter_string(intent_filters: dict, schema) -> str | None:
     return " AND ".join(parts)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  HELPER: Build search query string from parsed intent
-# ══════════════════════════════════════════════════════════════════════════════
-
 def _build_search_query(state: dict) -> str:
-    """
-    Builds the query string to send to Meilisearch.
-
-    Priority:
-      1. Join parsed_intent.entities (e.g. ["sci-fi", "time travel"] → "sci-fi time travel")
-      2. Fall back to the raw user query if no entities were extracted
-
-    Args:
-        state: The pipeline state dict.
-
-    Returns:
-        The search query string for Meilisearch.
-    """
+    """Builds the query string to send to Meilisearch."""
     intent = state.get("parsed_intent", {})
     entities = intent.get("entities", [])
 
@@ -182,29 +121,10 @@ def _build_search_query(state: dict) -> str:
     return get_effective_user_query(state)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  HELPER: Map Meilisearch hits to SearchResult objects
-# ══════════════════════════════════════════════════════════════════════════════
-
 def _hits_to_search_results(hits: list[dict]) -> list[SearchResult]:
-    """
-    Converts raw Meilisearch hit dicts into SearchResult Pydantic models.
-
-    Each hit from Meilisearch looks like:
-        {"id": "11", "title": "Example", "_rankingScore": 0.95, ...}
-
-    We extract the core fields and store everything else in source_fields
-    so downstream nodes (evaluator, reranker) can access any field they need.
-
-    Args:
-        hits: List of hit dicts from Meilisearch response.
-
-    Returns:
-        List of SearchResult objects.
-    """
+    """Converts raw Meilisearch hit dicts into SearchResult models."""
     results = []
     for hit in hits:
-        # Parse freshness timestamp from indexed_at (unix seconds)
         freshness_ts = None
         indexed_at = hit.get("indexed_at")
         if indexed_at:
@@ -213,24 +133,21 @@ def _hits_to_search_results(hits: list[dict]) -> list[SearchResult]:
             except (ValueError, TypeError, OSError):
                 pass
 
-        result = SearchResult(
-            id=str(hit.get("id", "")),
-            title=hit.get("title", ""),
-            score=float(hit.get("_rankingScore", 0.0)),
-            source_fields={
-                k: v for k, v in hit.items()
-                if k not in ("id", "title", "_rankingScore")
-            },
-            freshness_timestamp=freshness_ts,
+        results.append(
+            SearchResult(
+                id=str(hit.get("id", "")),
+                title=hit.get("title", ""),
+                score=float(hit.get("_rankingScore", 0.0)),
+                source_fields={
+                    k: v for k, v in hit.items()
+                    if k not in ("id", "title", "_rankingScore")
+                },
+                freshness_timestamp=freshness_ts,
+            )
         )
-        results.append(result)
 
     return results
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  HELPER: Build freshness report
-# ══════════════════════════════════════════════════════════════════════════════
 
 def _build_freshness_report(
     results: list[SearchResult],
@@ -238,21 +155,7 @@ def _build_freshness_report(
     index_stats_updated_at: datetime | None,
     index_meta_ok: bool,
 ) -> FreshnessReport:
-    """
-    Checks how fresh/stale the search results are.
-
-    PRD Section 4.3: "Surface index freshness metadata in every response."
-
-    Uses two thresholds from .env:
-      - FRESHNESS_THRESHOLD_SECONDS (default 300 = 5 min) — results newer than this are "fresh"
-      - STALENESS_THRESHOLD_SECONDS (default 3600 = 1 hour) — results older than this are "stale"
-
-    Args:
-        results: List of SearchResult objects with freshness_timestamp set.
-
-    Returns:
-        FreshnessReport with staleness flags and stale result IDs.
-    """
+    """Checks how fresh/stale the search results are."""
     now = datetime.now(timezone.utc)
     stale_ids = []
     max_staleness = 0.0
@@ -286,34 +189,8 @@ def _build_freshness_report(
     )
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  MAIN NODE FUNCTION
-# ══════════════════════════════════════════════════════════════════════════════
-
 def searcher_node(state: dict) -> dict:
-    """
-    The searcher node — executes the actual search against Meilisearch.
-
-    Flow:
-      Step 1: Build search query from parsed intent entities
-      Step 2: Build Meilisearch filter string from parsed intent filters
-      Step 3: Call Meilisearch with the chosen retrieval strategy
-      Step 4: If zero results with filters → retry without filters (filter relaxation)
-      Step 5: Map hits to SearchResult objects
-      Step 6: Build freshness report
-      Step 7: Update state with results and metadata
-      Step 8: Log structured node exit + LangWatch annotation
-
-    If Meilisearch is completely unreachable (after retries + fallback in the client),
-    we write an ERROR to state. The graph's route_after_searcher will send it
-    straight to reporter, skipping evaluator/reranker.
-
-    Args:
-        state: The pipeline state dict.
-
-    Returns:
-        Dict of only the keys this node changed.
-    """
+    """Execute search against Meilisearch (``MEILI_INDEX_NAME``) and update state."""
     start = time.perf_counter()
     query_hash = state.get("query_hash", "")
     strategy = state.get("retrieval_strategy", "HYBRID")
@@ -328,12 +205,12 @@ def searcher_node(state: dict) -> dict:
     retrieve_fields = schema.meilisearch_attributes_to_retrieve()
     stop_words = _stop_words_for(schema)
 
-    # ── Step 1: Build the search query ────────────────────────────────────────
     search_query = _build_search_query(state)
 
-    # ── Step 2: Build Meilisearch filters ─────────────────────────────────────
     intent = state.get("parsed_intent", {})
     filter_string = _build_filter_string(intent.get("filters", {}), schema)
+
+    limit = C.SEARCH_HITS_LIMIT
 
     logger.info(
         "searcher_executing",
@@ -345,20 +222,18 @@ def searcher_node(state: dict) -> dict:
         },
     )
 
-    # ── Step 3: Call Meilisearch ──────────────────────────────────────────────
     try:
         raw_response = meili_search(
             query=search_query,
             strategy=strategy,
             hybrid_weights=hybrid_weights,
             filters=filter_string,
-            limit=20,
+            limit=limit,
             retrieve_fields=retrieve_fields,
         )
         hits = raw_response.get("hits", [])
-        partial_results = bool(raw_response.get("is_fallback", False))
+        partial_results = bool(raw_response.get("partial", False))
 
-        # ── Step 4: Filter relaxation ─────────────────────────────────────────
         if len(hits) == 0 and filter_string:
             logger.info(
                 "searcher_filter_relaxation",
@@ -374,7 +249,7 @@ def searcher_node(state: dict) -> dict:
                 strategy=strategy,
                 hybrid_weights=hybrid_weights,
                 filters=None,
-                limit=20,
+                limit=limit,
                 retrieve_fields=retrieve_fields,
             )
             hits = raw_response.get("hits", [])
@@ -393,10 +268,6 @@ def searcher_node(state: dict) -> dict:
                 ).model_dump()
             )
 
-        # ── Step 4b: Semantic degradation fallback ─────────────────────────
-        # When hybrid/semantic search returns results that share zero keywords
-        # with the query, the embedder is likely producing degenerate vectors.
-        # Fall back to keyword search so relevant results are not silently lost.
         if (
             strategy in ("HYBRID", "SEMANTIC")
             and hits
@@ -420,7 +291,7 @@ def searcher_node(state: dict) -> dict:
                 query=search_query,
                 strategy="KEYWORD",
                 filters=filter_string,
-                limit=20,
+                limit=limit,
                 retrieve_fields=retrieve_fields,
             )
             keyword_hits = keyword_response.get("hits", [])
@@ -457,10 +328,8 @@ def searcher_node(state: dict) -> dict:
                 ).model_dump()
             )
 
-        # ── Step 5: Map hits to SearchResult objects ──────────────────────────
         search_results = _hits_to_search_results(hits)
 
-        # ── Step 6: Build freshness report ────────────────────────────────────
         idx_stats_at, idx_meta_ok = get_index_updated_at_meta()
         freshness = _build_freshness_report(
             search_results,
@@ -468,7 +337,6 @@ def searcher_node(state: dict) -> dict:
             index_meta_ok=idx_meta_ok,
         )
 
-        # ── Step 7: Update state ──────────────────────────────────────────────
         updates["search_results"] = [r.model_dump() for r in search_results]
         updates["freshness_metadata"] = freshness.model_dump()
         updates["filter_relaxation_applied"] = filter_relaxation
@@ -544,7 +412,6 @@ def searcher_node(state: dict) -> dict:
         result_count = 0
         strategy_used = strategy
 
-    # ── Step 8: Log and annotate node exit ────────────────────────────────────
     duration_ms = (time.perf_counter() - start) * 1000
 
     log_node_exit(

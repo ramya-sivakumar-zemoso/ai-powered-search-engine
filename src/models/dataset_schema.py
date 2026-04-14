@@ -152,15 +152,15 @@ class DatasetSchema(BaseModel):
         description="If set, overrides CLI demo queries for this schema.",
     )
     ui_product_title: str = Field(
-        default="AI Search",
+        default="Search",
         description="Short product name for Streamlit / CLI headers.",
     )
     ui_product_subtitle: str = Field(
-        default="Hybrid keyword + semantic search over your catalog",
+        default="Find results",
         description="One-line subtitle under the product title.",
     )
     ui_query_placeholder: str = Field(
-        default="Search the catalog…",
+        default="What are you looking for?",
         description="Placeholder for the search box.",
     )
     ui_image_field: str | None = Field(

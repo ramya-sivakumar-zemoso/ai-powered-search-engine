@@ -117,9 +117,6 @@ Example: "sci-fi movies from 2020" → entities: ["sci-fi", "2020"], filters: {"
         "transactional": "buy tickets for Interstellar IMAX",
         "multilang": "mejores peliculas sci-fi movies",
     },
-    ui_product_title="Movie Search",
-    ui_product_subtitle="Hybrid search across your film catalog",
-    ui_query_placeholder="e.g. sci-fi time travel, Inception, family animation…",
     ui_image_field="poster",
     ui_tag_fields=["genres_all", "category"],
 )
@@ -232,9 +229,6 @@ Example: "wireless headphones under 200 from Sony" → entities + filters for br
         "transactional": "buy USB-C hub same day delivery",
         "multilang": "meilleures chaussures de course",
     },
-    ui_product_title="Store Search",
-    ui_product_subtitle="Product discovery with hybrid search",
-    ui_query_placeholder="e.g. running shoes size 10, stainless bottle, desk lamp LED…",
     ui_image_field=None,
     ui_tag_fields=["category", "brand"],
 )
@@ -356,9 +350,6 @@ Prefer: category, brand, in_stock, tags when clearly stated.
         "transactional": "buy USB-C hub same day delivery",
         "multilang": "meilleures chaussures de course",
     },
-    ui_product_title="E-commerce Search",
-    ui_product_subtitle="Product discovery with hybrid search",
-    ui_query_placeholder="e.g. running shoes, desk lamp LED, kitchen blender…",
     ui_image_field="poster",
     ui_tag_fields=["category", "brand", "genres_all"],
 )
@@ -472,9 +463,6 @@ Use category for sport/league; brand for venue or home side when implied.
         "transactional": "buy two tickets midfield",
         "multilang": "partidos de fútbol esta semana",
     },
-    ui_product_title="Sports Search",
-    ui_product_subtitle="Events, teams, and fixtures",
-    ui_query_placeholder="e.g. Premier League Saturday, finals tickets, tennis NYC…",
     ui_image_field=None,
     ui_tag_fields=["category", "genres_all", "brand"],
 )

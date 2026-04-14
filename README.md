@@ -1,6 +1,6 @@
 # AI-Powered Search Engine
 
-Hybrid search on **Meilisearch** (keyword + semantic) with **multilingual-e5-large** embeddings (`intfloat/multilingual-e5-large` via `EMBEDDING_MODEL`, 1024 dims, served via Kaggle + ngrok) on the index, and a **BGE** cross-encoder reranker (`BAAI/bge-reranker-v2-m3` via `RERANKER_MODEL`) in the pipeline.
+Hybrid search on **Meilisearch** (keyword + semantic) with **paraphrase-multilingual-MiniLM-L12-v2** by default (`EMBEDDING_MODEL`, 384-d via Meilisearch’s built-in Hugging Face embedder). Swap models by changing `EMBEDDING_MODEL` and `EMBEDDING_DIMENSIONS` in `.env`, then re-index. The pipeline uses a **cross-encoder** reranker (`RERANKER_MODEL`, default `BAAI/bge-reranker-v2-m3`).
 
 The codebase is **domain-agnostic**: movies, e-commerce, sports (and others) are configured by a **`DatasetSchema`** in `src/models/schema_registry.py`, selected with **`DATASET_SCHEMA`** in `.env`. Ingest maps raw columns → the shared internal document shape (`title`, `description`, `category`, `brand`, …) via **`FieldMapping`**. The pipeline (intent parsing, filters, retrieve fields, reranker text, Streamlit labels) reads that schema so behavior stays consistent across verticals.
 
@@ -48,29 +48,11 @@ python main.py --query "science fiction adventure"
 # or: streamlit run streamlit_app.py
 ```
 
-## Kaggle + ngrok (E5 server)
+## Embeddings and reranker models
 
-To use `intfloat/multilingual-e5-large` from Kaggle as a self-hosted embedding
-endpoint:
+Indexing uses Meilisearch’s **Hugging Face** embedder. Defaults are in `.env.example` (`EMBEDDING_MODEL`, `EMBEDDING_DIMENSIONS`). Reranking uses **`RERANKER_MODEL`** (sentence-transformers `CrossEncoder`). Change either set of variables to point at another compatible Hugging Face id, then restart services and **re-index** after embedding model changes:
 
-1. In Kaggle notebook, install: `sentence-transformers fastapi uvicorn pyngrok`
-2. Set `NGROK_AUTHTOKEN` (or `NGROK_AUTH_TOKEN`) as a Kaggle secret
-3. Run:
-
-```bash
-python scripts/kaggle_e5_ngrok_server.py --port 8080 --prefix-mode passage --print-env
-```
-
-Then set local `.env`:
-
-```bash
-EMBEDDER_SOURCE=self_hosted
-EMBEDDING_SERVER_URL=https://<ngrok-domain>
-EMBEDDING_MODEL=intfloat/multilingual-e5-large
-EMBEDDING_DIMENSIONS=1024
-```
-
-Re-index after switching model:
+Re-index after changing the embedding model or dimensions:
 
 ```bash
 python -m src.tools.setup_index --reset --schema movies

@@ -28,7 +28,7 @@ if "last_pipeline_result" not in st.session_state:
     st.session_state.last_pipeline_result = None
 
 st.set_page_config(
-    page_title=_ui_schema.ui_product_title,
+    page_title="AI powered search engine",
     layout="wide",
     page_icon="🔍",
 )
@@ -65,13 +65,7 @@ st.markdown("""
 .n-rk  { background:#0f2d2d; color:#39d353; border:1px solid #196127; }
 .n-rp  { background:#2d1616; color:#f85149; border:1px solid #b62324; }
 
-/* ── inspector tabs (unchanged) ─────────────────── */
-.section-label {
-    font-size: 10px; font-weight: 600; letter-spacing: 0.12em;
-    text-transform: uppercase; color: #484f58;
-    border-bottom: 1px solid #21262d;
-    padding-bottom: 6px; margin-bottom: 10px;
-}
+/* ── inspector tabs ───────────────────────────────── */
 .node-tag {
     display: inline-block; font-size: 10px; font-weight: 600;
     letter-spacing: 0.08em; text-transform: uppercase;
@@ -654,7 +648,7 @@ if st.session_state.last_pipeline_result:
     with tab_results:
         render_serp(final_state)
 
-    # ── Tab 2: Pipeline Inspector (debug per-node + raw state) ────────────
+    # ── Tab 2: Pipeline Inspector (debug per-node) ────────────────────────
     with tab_pipeline:
         render_pipeline_flow()
 
@@ -676,10 +670,9 @@ if st.session_state.last_pipeline_result:
             else:
                 sub_labels.append(f"{base} ({runs}x)")
 
-        sub_labels.append("raw state")
         sub_tabs = st.tabs(sub_labels)
 
-        for i, tab in enumerate(sub_tabs[:-1]):
+        for i, tab in enumerate(sub_tabs):
             with tab:
                 name = PIPELINE_ORDER[i]
                 steps = trace_by_node.get(name, [])
@@ -726,10 +719,3 @@ if st.session_state.last_pipeline_result:
                             '<p style="color:#484f58;font-size:13px;font-style:italic;">No unique state changes at this step.</p>',
                             unsafe_allow_html=True,
                         )
-
-        with sub_tabs[-1]:
-            st.markdown(
-                '<div class="section-label">complete merged state</div>',
-                unsafe_allow_html=True,
-            )
-            st.json(to_jsonable(final_state, max_search_hits=int(max_hits)))
