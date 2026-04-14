@@ -97,6 +97,17 @@ class Settings:
     kafka_sasl_password: str       # leave empty for PLAINTEXT
     kafka_max_poll_records: int    # max records per poll (default 10)
 
+    # ── LangGraph checkpointer (crash recovery) ───────────
+    # Backend for persisting graph state between nodes so a mid-pipeline crash
+    # can resume from the last completed node rather than starting over.
+    # Options: sqlite (default) | postgres | memory | none
+    checkpointer_type: str
+    # Path to the SQLite database file (used when checkpointer_type=sqlite).
+    checkpointer_sqlite_path: str
+    # PostgreSQL connection string (used when checkpointer_type=postgres).
+    # Format: postgresql://user:password@host:port/dbname
+    checkpointer_postgres_url: str
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
@@ -162,5 +173,9 @@ def get_settings() -> Settings:
         kafka_sasl_username=os.getenv("KAFKA_SASL_USERNAME", ""),
         kafka_sasl_password=os.getenv("KAFKA_SASL_PASSWORD", ""),
         kafka_max_poll_records=int(os.getenv("KAFKA_MAX_POLL_RECORDS", "10")),
+        # ── LangGraph checkpointer ─────────────────────────────────
+        checkpointer_type=os.getenv("CHECKPOINTER_TYPE", "sqlite").lower().strip(),
+        checkpointer_sqlite_path=os.getenv("CHECKPOINTER_SQLITE_PATH", "checkpoints.db"),
+        checkpointer_postgres_url=os.getenv("CHECKPOINTER_POSTGRES_URL", ""),
     )
     

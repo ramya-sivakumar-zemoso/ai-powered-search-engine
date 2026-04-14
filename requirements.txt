@@ -37,6 +37,13 @@ pytest-cov==6.0.0
 # UI
 streamlit==1.55.0
 
+# Optional — LangGraph checkpoint persistence (install the backend you need)
+# SQLite  (zero extra services, recommended for local/single-process):
+#   pip install langgraph-checkpoint-sqlite
+# PostgreSQL (multi-process, production):
+#   pip install langgraph-checkpoint-postgres
+# Set CHECKPOINTER_TYPE in .env: sqlite | postgres | memory | none
+
 # Optional — real-time ingest (install when using Kafka or FastAPI ingest API)
 # pip install confluent-kafka fastapi "uvicorn[standard]"
 # Or: pip install -e ".[streaming]"

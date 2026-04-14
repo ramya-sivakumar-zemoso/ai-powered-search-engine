@@ -35,6 +35,7 @@ from src.nodes.searcher import searcher_node
 from src.nodes.evaluator import evaluator_node
 from src.nodes.reranker import reranker_node, hydrate_async_explanations_in_state
 from src.nodes.reporter import reporter_node, assemble_final_response
+from src.utils.checkpointer import build_checkpointer
 from src.utils.logger import get_logger
 from src.utils.state_display import state_delta
 
@@ -173,14 +174,25 @@ def build_graph() -> StateGraph:
     return graph
 
 
-def compile_graph():
-    """Build and compile the graph — ready to be invoked."""
-    graph = build_graph()
-    return graph.compile()
+def compile_graph(checkpointer=None):
+    """Build and compile the graph — ready to be invoked.
 
+    Args:
+        checkpointer: A LangGraph-compatible checkpointer (MemorySaver,
+            SqliteSaver, PostgresSaver, …) or ``None`` to disable persistence.
+            When provided, every node's output is snapshotted so a crashed
+            pipeline can resume from its last completed node.
+    """
+    graph = build_graph()
+    return graph.compile(checkpointer=checkpointer)
+
+
+# Build the persistence backend once at module load.
+# Controlled by CHECKPOINTER_TYPE in .env (default: sqlite → checkpoints.db).
+_checkpointer = build_checkpointer()
 
 # Compile once at module level — avoids rebuilding the graph on every request.
-_compiled_app = compile_graph()
+_compiled_app = compile_graph(checkpointer=_checkpointer)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -226,7 +238,14 @@ def run_search_with_trace(
     # node output against the snapshot from the prior ``values`` event.
     last_snapshot: dict[str, Any] = dict(initial_state)
 
-    for event in app.stream(initial_state, stream_mode=["updates", "values"]):
+    # When a checkpointer is active, thread_id keys the checkpoint store so that
+    # a process crash mid-pipeline can be resumed by re-invoking with the same
+    # session_id. Without a checkpointer the config dict is left empty.
+    stream_config: dict = (
+        {"configurable": {"thread_id": sid}} if _checkpointer is not None else {}
+    )
+
+    for event in app.stream(initial_state, config=stream_config, stream_mode=["updates", "values"]):
         mode, payload = event
         if mode == "values":
             final_state = payload
