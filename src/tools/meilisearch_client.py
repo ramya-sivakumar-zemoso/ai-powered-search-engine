@@ -19,6 +19,7 @@ from meilisearch.errors import (
     MeilisearchTimeoutError,
 )
 
+import src.constants as C
 from src.models.schema_registry import get_schema
 from src.utils.config import get_settings
 from src.utils.logger import get_logger
@@ -85,14 +86,15 @@ def _execute_search(
     index = _get_client().index(idx)
     last_error: Exception | None = None
 
-    for attempt in range(3):
+    max_attempts = C.MEILI_SEARCH_MAX_ATTEMPTS
+    for attempt in range(max_attempts):
         try:
             result = index.search(query, opt_params)
             return _norm(result, strategy_label, False)
         except _RETRYABLE as exc:
             last_error = exc
-            if attempt < 2:
-                wait = 0.1 * (2 ** (attempt + 1))
+            if attempt < max_attempts - 1:
+                wait = C.MEILI_SEARCH_RETRY_BACKOFF_BASE_S * (2 ** (attempt + 1))
                 logger.warning(
                     "meili_retry",
                     extra={"attempt": attempt + 1, "wait_s": wait, "error": str(exc)},
@@ -115,7 +117,7 @@ def _execute_search(
             ) from fallback_exc
 
     raise RuntimeError(
-        f"Meilisearch search failed after 3 retries: {last_error}"
+        f"Meilisearch search failed after {max_attempts} retries: {last_error}"
     ) from last_error
 
 
@@ -290,9 +292,19 @@ def get_index_stats(index_name: str | None = None) -> dict[str, Any]:
     idx = index_name or settings.meili_index_name
     try:
         data = _get_client().index(idx).get_stats()
+        # SDK returns IndexStats (attrs); older responses may be plain dicts.
+        if isinstance(data, dict):
+            return {
+                "number_of_documents": int(
+                    data.get("numberOfDocuments", data.get("number_of_documents", 0))
+                ),
+                "is_indexing": bool(
+                    data.get("isIndexing", data.get("is_indexing", False))
+                ),
+            }
         return {
-            "number_of_documents": data.get("numberOfDocuments", 0),
-            "is_indexing": data.get("isIndexing", False),
+            "number_of_documents": int(getattr(data, "number_of_documents", 0)),
+            "is_indexing": bool(getattr(data, "is_indexing", False)),
         }
     except Exception as exc:
         logger.error("stats_api_failure", extra={"error": str(exc)})

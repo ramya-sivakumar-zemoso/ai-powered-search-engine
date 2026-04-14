@@ -475,11 +475,11 @@ Using GPT-4o-mini pricing:
 | Reranker explanations | ~800 prompt + ~400 completion | ~$0.00036 |
 | **LLM subtotal** | | **~$0.0005** |
 | Cross-encoder reranking | Local CPU inference | $0.00 |
-| Embeddings | Pre-computed at index time (self-hosted via Kaggle + ngrok) | $0.00 per search query |
+| Embeddings | Pre-computed at index time (Meilisearch built-in Hugging Face embedder) | $0.00 per search query |
 
 **At 10,000 queries/day:** ~$5/day LLM cost. With `FAST_MODE=true`: ~$1.30/day (no explanations).
 
-**Embedding model:** `intfloat/multilingual-e5-large` (1024 dims), served via a self-hosted Kaggle + ngrok endpoint (`EMBEDDER_SOURCE=self_hosted`). Embeddings are computed at index time and stored in Meilisearch. No embedding cost per search query — vectors are already in the index.
+**Embedding model:** Configured with `EMBEDDING_MODEL` / `EMBEDDING_DIMENSIONS` (default: `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`, 384-d) via Meilisearch’s `huggingFace` embedder at index setup. **Reranker:** `RERANKER_MODEL` (default `BAAI/bge-reranker-v2-m3`). Swap either via `.env` and re-index when the embedding model changes.
 
 ---
 
