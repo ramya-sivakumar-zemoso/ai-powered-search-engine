@@ -1,6 +1,7 @@
 [build-system]
-requires = ["setuptools>=68.0", "wheel"]
-build-backend = "setuptools.backends.legacy:build"
+# ``setuptools.backends.legacy`` was removed in setuptools 82+; ``build_meta`` is the standard backend.
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "novamart-search"
@@ -47,7 +48,9 @@ dev = [
     "pytest-cov==6.0.0",
 ]
 ui = [
-    "streamlit>=1.28.0,<2",
+    "streamlit>=1.33.0,<2",
+    # Live query word-limit UI while typing (avoids ``st.text_input`` commit-on-blur lag).
+    "streamlit-keyup>=0.3.0",
 ]
 # Real-time ingest: HTTP API + Kafka consumer/producer (not required for batch setup_index or tests).
 streaming = [

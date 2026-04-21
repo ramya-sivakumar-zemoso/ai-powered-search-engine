@@ -15,6 +15,7 @@ from src.models.state import (
     TokenUsage,
     SearchAttempt,
     RetrievalStrategy,
+    PipelineEvent,
 )
 from src.models.schema_registry import get_schema
 from src.utils.config import get_settings
@@ -24,6 +25,10 @@ from src.utils.injection_guard import (
     format_user_query_for_human_message,
     log_injection_signature_hits,
     sanitize_query_for_llm,
+)
+from src.utils.query_word_limit import (
+    query_word_limit_user_notice,
+    truncate_query_to_word_limit,
 )
 from src.utils.logger import get_logger, log_node_exit, log_injection_detection
 from src.utils.langwatch_tracker import (
@@ -172,12 +177,34 @@ def _parse_intent_with_llm(sanitized_query: str) -> tuple[dict, int, int]:
 #  MAIN NODE FUNCTION
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _apply_query_word_limit(
+    query: str,
+    updates: dict,
+    new_errors: list[dict],
+) -> str:
+    """Clamp ``query`` to ``max_query_words``; record truncation in ``updates`` / ``new_errors``."""
+    max_q_words = get_settings().max_query_words
+    clipped, truncated = truncate_query_to_word_limit(query, max_q_words)
+    if truncated:
+        updates["query"] = clipped
+        new_errors.append(
+            ExtractionError(
+                node="query_understander",
+                severity=ErrorSeverity.WARNING,
+                message=PipelineEvent.QUERY_WORD_LIMIT.value,
+                fallback_applied=True,
+                fallback_description=query_word_limit_user_notice(max_q_words),
+            ).model_dump()
+        )
+    return clipped
+
+
 def query_understander_node(state: dict) -> dict:
     """
     The query_understander node — entry point of the search pipeline.
 
     Flow:
-      Step 1: Generate a unique query hash (for traceability — PRD Section 5)
+      Step 1: Normalize query (optional word-count cap) and generate query hash
       Step 1b: Heuristic sanitisation (strip instruction-like lines/phrases)
       Step 2: Hard-block if heuristic stripped the entire query (full injection)
       Step 3: Scan sanitised query with LLM Guard ML model (PRD Section 4.7)
@@ -197,12 +224,16 @@ def query_understander_node(state: dict) -> dict:
     """
     start = time.perf_counter()
     query = state.get("query", "")
+    if not isinstance(query, str):
+        query = str(query) if query is not None else ""
 
     # Accumulate updates — only changed keys are returned
     updates: dict = {}
     new_errors: list[dict] = []
     new_token_usage: list[dict] = []
     new_search_history: list[dict] = []
+
+    query = _apply_query_word_limit(query, updates, new_errors)
 
     # ── Step 1: Generate query hash for traceability ─────────────────────────
     query_hash = hashlib.md5(query.encode()).hexdigest()[:12]

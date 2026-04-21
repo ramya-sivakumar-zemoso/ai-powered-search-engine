@@ -41,6 +41,7 @@ def state_factory():
             "search_history": [],
             "parsed_intent": {},
             "errors": [],
+            "retrieval_soft_match": False,
         }
         base.update(overrides)
         return base

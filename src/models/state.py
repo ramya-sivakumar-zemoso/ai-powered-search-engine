@@ -43,6 +43,7 @@ class PipelineEvent(str, Enum):
     ITERATION_LIMIT = "ITERATION_LIMIT"
     BUDGET_EXCEEDED = "BUDGET_EXCEEDED"
     NEAR_DUPLICATE_VARIANT = "NEAR_DUPLICATE_VARIANT"
+    QUERY_WORD_LIMIT = "QUERY_WORD_LIMIT"
 
 # ── Small models  ────────────────────────────────────────────
 class ExtractionError(BaseModel):
@@ -135,6 +136,11 @@ class SearchState(BaseModel):
     query_hash: str = ""
     # Traceability (PRD Section 5 — LangWatch / observability)
     session_id: str = ""
+    # Optional Meilisearch index UID (Streamlit / API override; default from settings).
+    meili_index_name: str = ""
+    # Searcher: mid-confidence neighbors vs query — reporter shows a gentle warning unless
+    # downstream evaluator signals clearly contradict that.
+    retrieval_soft_match: bool = False
     # query_understander output
     parsed_intent: IntentModel = Field(default_factory=IntentModel)
     # retrieval_router output
@@ -158,7 +164,7 @@ class SearchState(BaseModel):
     retry_prescription: RetryPrescription | None = None
     partial_results: bool = False
     rerank_degraded: bool = False
-    # Loop prevention (PRD Section 4.5)
+    # Loop prevention (PRD Section 4.5) — evaluator pass index (1 + retry loops completed).
     iteration_count: int = 0
     search_history: list[SearchAttempt] = Field(default_factory=list)
     # Token budget tracking (PRD Section 4.5)
@@ -184,6 +190,8 @@ class SearchStateDict(TypedDict, total=False):
     sanitized_query: str
     query_hash: str
     session_id: str
+    meili_index_name: str
+    retrieval_soft_match: bool
     # ── query_understander output ──
     parsed_intent: dict
     # ── retrieval_router output ──

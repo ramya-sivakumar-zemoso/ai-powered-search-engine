@@ -34,8 +34,10 @@ class Settings:
     langwatch_project: str
 
     # ── Pipeline tuning ──────────────────────────────────
-    # Max evaluator-triggered retries (extra search rounds after the first).
+    # Max retry loops after the first search (retrieval_router → searcher → evaluator each).
     max_search_iterations: int
+    # Max words per user query (extra words dropped before intent/search); 0 = unlimited.
+    max_query_words: int
     # Per-query LLM spend cap (USD); cumulative + projected call estimates enforced in nodes.
     token_budget_usd: float
     reranker_top_n: int
@@ -126,6 +128,9 @@ def get_settings() -> Settings:
         # ── Pipeline tuning ──────────────────────────────────
         max_search_iterations=int(
             os.getenv("MAX_SEARCH_ITERATIONS", str(C.DEFAULT_MAX_SEARCH_ITERATIONS)),
+        ),
+        max_query_words=int(
+            os.getenv("MAX_QUERY_WORDS", str(C.DEFAULT_MAX_QUERY_WORDS)),
         ),
         token_budget_usd=float(os.getenv("TOKEN_BUDGET_USD", str(C.DEFAULT_TOKEN_BUDGET_USD))),
         reranker_top_n=int(os.getenv("RERANKER_TOP_N", str(C.DEFAULT_RERANKER_TOP_N))),

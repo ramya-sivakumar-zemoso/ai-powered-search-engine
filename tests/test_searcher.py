@@ -103,6 +103,69 @@ def test_freshness_unknown_when_index_meta_fails():
 # ── Searcher Node (mocked Meilisearch) ─────────────────────────────────────
 
 
+def test_searcher_node_forwards_meili_index(mocker, state_factory):
+    mock_search = mocker.patch(
+        "src.nodes.searcher.meili_search",
+        return_value={"hits": [{"id": "1", "title": "Alien", "_rankingScore": 0.9}]},
+    )
+    state = state_factory(
+        query="alien",
+        meili_index_name="custom_products",
+        parsed_intent={"entities": ["alien"], "filters": {}},
+    )
+    searcher_node(state)
+    assert mock_search.call_args.kwargs.get("index_name") == "custom_products"
+
+
+def test_searcher_sets_retrieval_soft_match_for_weak_neighbors(mocker, state_factory):
+    mocker.patch(
+        "src.nodes.searcher.meili_search",
+        return_value={
+            "hits": [{
+                "id": "1",
+                "title": "LeapFrog Outdoor Toys",
+                "_rankingScore": 0.4,
+                "description": "Outdoor play.",
+                "category": "Toys & Games",
+            }],
+            "partial": False,
+        },
+    )
+    state = state_factory(
+        query="flying robot",
+        sanitized_query="flying robot",
+        parsed_intent={"entities": [], "filters": {}},
+    )
+    out = searcher_node(state)
+    assert out.get("retrieval_soft_match") is True
+    assert len(out["search_results"]) == 1
+
+
+def test_searcher_clears_hits_on_absurd_query(mocker, state_factory):
+    mocker.patch(
+        "src.nodes.searcher.meili_search",
+        return_value={
+            "hits": [{
+                "id": "1",
+                "title": "Anything",
+                "_rankingScore": 0.95,
+                "description": "x",
+            }],
+            "partial": False,
+        },
+    )
+    state = state_factory(
+        query="@@@@@@@@@@@@@@@@@@@@",
+        parsed_intent={"entities": [], "filters": {}},
+    )
+    out = searcher_node(state)
+    assert out["search_results"] == []
+    assert any(
+        isinstance(e, dict) and e.get("message") == "QUERY_NOT_SEARCHABLE"
+        for e in out.get("errors", [])
+    )
+
+
 def test_searcher_node_success(mocker, state_factory):
     mocker.patch(
         "src.nodes.searcher.meili_search",

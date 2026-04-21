@@ -12,15 +12,58 @@ import time
 import uuid
 
 import streamlit as st
+
+try:
+    from st_keyup import st_keyup as _st_keyup_for_query
+except ImportError:  # pragma: no cover - optional UI dependency
+    _st_keyup_for_query = None
 from src.graph.graph import run_search_with_trace, hydrate_async_explanations
 from src.models.schema_registry import get_schema
+from src.tools.meilisearch_client import list_index_uids
 from src.utils.config import get_settings
+from src.utils.query_word_limit import query_word_limit_user_notice
 from src.utils.model_warmup import start_background_warmup
 from src.utils.state_display import to_jsonable
 
 _settings = get_settings()
 _ui_schema = get_schema(_settings.dataset_schema)
 start_background_warmup()
+
+# Session key for the main search box (counter + word-limit banner read this value).
+_QUERY_WIDGET_KEY = "nv_streamlit_search_query"
+
+
+def _query_word_count(text: str) -> int:
+    return len((text or "").strip().split())
+
+
+def _render_query_word_limit_ui(input_key: str, max_words: int) -> None:
+    """Word counter (n / N) and colored banner when over the cap — no overflow-word preview."""
+    if max_words <= 0:
+        return
+    raw = st.session_state.get(input_key)
+    if not isinstance(raw, str):
+        raw = str(raw or "")
+    n = _query_word_count(raw)
+    over = n > max_words
+    cls = "query-word-counter over" if over else "query-word-counter"
+    st.markdown(
+        f'<div class="{cls}">{n} / {max_words} words</div>',
+        unsafe_allow_html=True,
+    )
+    if over:
+        msg = query_word_limit_user_notice(max_words)
+        st.markdown(
+            f'<div class="query-word-limit-banner">{html.escape(msg)}</div>',
+            unsafe_allow_html=True,
+        )
+
+
+@st.cache_data(ttl=30)
+def _cached_meili_index_uids(meili_url: str) -> list[str]:
+    """List index UIDs from Meilisearch (short TTL so new indexes appear quickly)."""
+    return list_index_uids()
+
 
 if "pipeline_session_id" not in st.session_state:
     st.session_state.pipeline_session_id = str(uuid.uuid4())
@@ -112,6 +155,28 @@ st.markdown("""
     font-size: 10px; font-weight: 700; text-transform: uppercase;
     letter-spacing: 0.08em; color: #3fb950; margin-bottom: 2px;
 }
+
+/* ── query word limit (search bar) ───────────────── */
+.query-word-counter {
+    font-size: 12px;
+    color: #8b949e;
+    margin-top: 4px;
+    letter-spacing: 0.02em;
+}
+.query-word-counter.over {
+    color: #f85149;
+    font-weight: 600;
+}
+.query-word-limit-banner {
+    margin-top: 8px;
+    padding: 10px 14px;
+    border-radius: 8px;
+    background: #3d4a2a;
+    border: 1px solid #5c6b40;
+    color: #f5f2b8;
+    font-size: 14px;
+    line-height: 1.45;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -182,7 +247,14 @@ _CROSS_CUTTING_KEYS = {
 _NODE_OWN_KEYS: dict[str, set[str]] = {
     "query_understander": {"query_hash", "parsed_intent"},
     "retrieval_router":   {"retrieval_strategy", "hybrid_weights", "router_reasoning"},
-    "searcher":           {"search_results", "freshness_metadata", "filter_relaxation_applied"},
+    "searcher":           {
+        "search_results",
+        "freshness_metadata",
+        "filter_relaxation_applied",
+        "partial_results",
+        "retrieval_soft_match",
+        "errors",
+    },
     "evaluator":          {"quality_scores", "evaluator_decision", "retry_prescription"},
     "reranker":           {
         "reranked_results",
@@ -219,14 +291,8 @@ def _render_reporter_tab(delta: dict, max_hits: int) -> None:
 
     fr = to_jsonable(fr_raw, max_search_hits=max_hits)
 
-    # ── Warnings (show first so they're not missed) ──────────────────
-    warnings_list = fr.get("warnings", [])
-    for w in warnings_list:
-        if isinstance(w, dict):
-            node = w.get("node", "")
-            msg = w.get("message", "")
-            detail = w.get("detail", "")
-            st.warning(f"**{node}** — {msg}" + (f": {detail}" if detail else ""))
+    # Inspector-only: omit consumer warnings/notices (``warnings`` + ``result_quality_notice``).
+    # Those belong on **Search Results**; here they duplicate state the metrics already summarize.
 
     # ── Overview ─────────────────────────────────────────────────────
     meta = fr.get("pipeline_metadata", {})
@@ -396,15 +462,22 @@ def _truncate(text: str, length: int = 250) -> str:
     return text[:length].rsplit(" ", 1)[0] + "…"
 
 
-def _match_label_html(confidence: float) -> str:
+def _match_label_html(confidence: float, *, show_strong_match_labels: bool = True) -> str:
+    if not show_strong_match_labels:
+        return ""
     if confidence >= _CONFIDENCE_BEST:
-        return '<span class="match-label match-best">Best Match</span>'
+        return '<span class="match-label match-best">Best match</span>'
     if confidence >= _CONFIDENCE_GOOD:
-        return '<span class="match-label match-good">Good Match</span>'
+        return '<span class="match-label match-good">Good match</span>'
     return ""
 
 
-def _render_card_body(result: dict, search_hit: dict | None) -> None:
+def _render_card_body(
+    result: dict,
+    search_hit: dict | None,
+    *,
+    show_strong_match_labels: bool = True,
+) -> None:
     """Render a single result card using native Streamlit layout."""
     rid = str(result.get("id", ""))
     title = search_hit.get("title", rid) if search_hit else rid
@@ -440,7 +513,9 @@ def _render_card_body(result: dict, search_hit: dict | None) -> None:
 
     with col_body:
         year_str = f"  ({year})" if year else ""
-        match_label = _match_label_html(confidence)
+        match_label = _match_label_html(
+            confidence, show_strong_match_labels=show_strong_match_labels,
+        )
         st.markdown(
             f'<span style="font-size:17px;font-weight:700;color:#e6edf3;">'
             f'{html.escape(title)}</span>'
@@ -470,6 +545,13 @@ def _render_card_body(result: dict, search_hit: dict | None) -> None:
                 )
 
 
+def _render_result_quality_notice(fr: dict) -> None:
+    """Calmer than st.warning—reads as helpful context (retailer-style), not an error."""
+    notice = fr.get("result_quality_notice")
+    if notice:
+        st.info(notice)
+
+
 def _render_pipeline_status_badges(fr: dict) -> None:
     """Render partial_results / rerank_degraded status badges above results."""
     partial = fr.get("partial_results", False)
@@ -480,13 +562,13 @@ def _render_pipeline_status_badges(fr: dict) -> None:
     if partial:
         badges_html += (
             '<span class="status-badge badge-warn">'
-            '⚠ Partial Results — keyword fallback active'
+            '⚠ Wider search — not every word may match'
             '</span>'
         )
     if degraded:
         badges_html += (
             '<span class="status-badge badge-warn">'
-            '⚠ Rerank Degraded — using original ranking order'
+            '⚠ Order may look a bit different than usual'
             '</span>'
         )
     st.markdown(
@@ -503,10 +585,16 @@ def _render_total_label(total_label: str) -> None:
     )
 
 
-def _render_result_cards(items: list[tuple[dict, dict | None]]) -> None:
+def _render_result_cards(
+    items: list[tuple[dict, dict | None]],
+    *,
+    show_strong_match_labels: bool = True,
+) -> None:
     for rd, search_hit in items:
         with st.container(border=True):
-            _render_card_body(rd, search_hit)
+            _render_card_body(
+                rd, search_hit, show_strong_match_labels=show_strong_match_labels,
+            )
 
 
 def _split_results_by_confidence(
@@ -539,17 +627,28 @@ def render_serp(final_state: dict) -> None:
 
     blocked = fr.get("blocked", False)
     if blocked:
-        st.error("This query was blocked by our safety system.Please try with another query")
+        st.error("We can't run that search. Please try different words.")
         return
 
     _render_pipeline_status_badges(fr)
+    _render_result_quality_notice(fr)
 
     results = fr.get("results", [])
     result_source = fr.get("result_source", "search")
     result_count = fr.get("result_count", len(results))
 
     if not results:
-        st.info("No results matched your query. Try different keywords.")
+        warn_msgs = [
+            w.get("message", "")
+            for w in fr.get("warnings", [])
+            if isinstance(w, dict)
+        ]
+        if "QUERY_NOT_SEARCHABLE" in warn_msgs:
+            st.info("Nothing found. That search does not look usable for this catalog.")
+        elif "RETRIEVAL_NO_RESULTS_LOW_SIGNAL" in warn_msgs:
+            st.info("Nothing found. Nothing here matched with enough confidence.")
+        else:
+            st.info("No matches found. Try other words.")
         return
 
     search_lookup = _build_result_lookup(final_state.get("search_results", []))
@@ -561,6 +660,7 @@ def render_serp(final_state: dict) -> None:
     )
 
     total_label = f"{result_count} result{'s' if result_count != 1 else ''}"
+    show_strong_labels = not bool(fr.get("result_quality_notice"))
 
     if top_results and other_results:
         shown = len(top_results)
@@ -570,13 +670,16 @@ def render_serp(final_state: dict) -> None:
             f'top result{"s" if shown != 1 else ""} of {total_label}</span>',
             unsafe_allow_html=True,
         )
-        _render_result_cards(top_results)
+        _render_result_cards(top_results, show_strong_match_labels=show_strong_labels)
         with st.expander(f"More results ({len(other_results)})"):
-            _render_result_cards(other_results)
+            _render_result_cards(other_results, show_strong_match_labels=show_strong_labels)
         return
 
     _render_total_label(total_label)
-    _render_result_cards(top_results or other_results)
+    _render_result_cards(
+        top_results or other_results,
+        show_strong_match_labels=show_strong_labels,
+    )
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -592,16 +695,51 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+idx_options = _cached_meili_index_uids(_settings.meili_url)
+if _settings.meili_index_name not in idx_options:
+    idx_options = sorted({*idx_options, _settings.meili_index_name})
+try:
+    _default_idx_pos = idx_options.index(_settings.meili_index_name)
+except ValueError:
+    _default_idx_pos = 0
+
+chosen_meili_index = st.selectbox(
+    "Meilisearch index",
+    idx_options,
+    index=_default_idx_pos,
+    help="All searches use this index until you pick a different one.",
+)
+
 # ── Search input ──────────────────────────────────────────────────────────────
 
 col_input, col_hits, col_btn = st.columns([5, 1, 1])
 
 with col_input:
-    query = st.text_input(
-        "Query",
-        placeholder=_ui_schema.ui_query_placeholder,
-        label_visibility="collapsed",
-    )
+    max_q_words = _settings.max_query_words
+    if _QUERY_WIDGET_KEY not in st.session_state:
+        st.session_state[_QUERY_WIDGET_KEY] = ""
+
+    if max_q_words > 0 and _st_keyup_for_query is not None:
+        _st_keyup_for_query(
+            "Query",
+            value=str(st.session_state.get(_QUERY_WIDGET_KEY) or ""),
+            key=_QUERY_WIDGET_KEY,
+            debounce=120,
+            placeholder=_ui_schema.ui_query_placeholder,
+            label_visibility="collapsed",
+        )
+    else:
+        st.text_input(
+            "Query",
+            placeholder=_ui_schema.ui_query_placeholder,
+            label_visibility="collapsed",
+            key=_QUERY_WIDGET_KEY,
+        )
+    if max_q_words > 0:
+        _render_query_word_limit_ui(_QUERY_WIDGET_KEY, max_q_words)
+
+query = (st.session_state.get(_QUERY_WIDGET_KEY) or "").strip()
+
 with col_hits:
     max_hits = st.number_input("Max hits", min_value=5, max_value=200, value=25)
 with col_btn:
@@ -619,6 +757,7 @@ if run and query.strip():
             final_state, trace = run_search_with_trace(
                 query.strip(),
                 session_id=st.session_state.pipeline_session_id,
+                meili_index_name=chosen_meili_index,
             )
             st.session_state.last_pipeline_result = {
                 "query": query.strip(),
