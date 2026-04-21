@@ -440,8 +440,11 @@ def evaluator_node(state: dict) -> dict:
         budget not exceeded             → "retry"   (evaluator-triggered retry)
       - Otherwise                       → "exhausted" (send best results forward)
 
-    ``MAX_SEARCH_ITERATIONS`` is the maximum number of **evaluator-triggered
-    retries** (not including the first search round).
+    ``MAX_SEARCH_ITERATIONS`` is the maximum number of **retry loops** after the
+    first search (each loop: retrieval_router → searcher → evaluator). The first
+    run does not count toward that limit; ``iteration_count`` is the evaluator
+    pass index (1 on first evaluation, up to ``1 + MAX_SEARCH_ITERATIONS`` when
+    the retry cap exhausts).
 
     Args:
         state: The pipeline state dict.
@@ -564,7 +567,7 @@ def evaluator_node(state: dict) -> dict:
                     fallback_applied=True,
                     fallback_description=(
                         f"Evaluator-triggered retry cap reached "
-                        f"({settings.max_search_iterations} max retries). "
+                        f"({settings.max_search_iterations} max retry loop(s) after the first search). "
                         f"Quality score {combined:.2f} vs threshold {ACCEPT_THRESHOLD}. "
                         f"Sending best available results forward."
                     ),

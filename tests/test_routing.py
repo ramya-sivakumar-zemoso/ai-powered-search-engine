@@ -57,7 +57,13 @@ def test_route_normal_to_router():
 
 def test_route_searcher_error_to_reporter():
     assert route_after_searcher(
-        {"errors": [{"severity": "ERROR", "message": "MEILI_DOWN"}]}
+        {
+            "errors": [{
+                "node": "searcher",
+                "severity": "ERROR",
+                "message": "MEILI_DOWN",
+            }],
+        }
     ) == "reporter"
 
 

@@ -11,7 +11,7 @@ What this node does:
   7. If zero results with filters → retries WITHOUT filters (filter relaxation)
   8. If Meilisearch is completely down → writes ERROR to state (graph skips to reporter)
 
-Uses ``MEILI_INDEX_NAME`` from settings for the target index.
+Uses ``state["meili_index_name"]`` when set, otherwise ``MEILI_INDEX_NAME`` from settings.
 
 No LLM call here → zero token cost.
 """
@@ -34,6 +34,7 @@ from src.tools.meilisearch_client import (
     get_index_updated_at_meta,
 )
 from src.utils.config import get_settings
+from src.utils import query_catalog_alignment as qca
 from src.utils.injection_guard import get_effective_user_query
 from src.utils.logger import get_logger, log_node_exit
 from src.utils.langwatch_tracker import annotate_node_span
@@ -190,12 +191,13 @@ def _build_freshness_report(
 
 
 def searcher_node(state: dict) -> dict:
-    """Execute search against Meilisearch (``MEILI_INDEX_NAME``) and update state."""
+    """Execute search against Meilisearch and update state."""
     start = time.perf_counter()
     query_hash = state.get("query_hash", "")
     strategy = state.get("retrieval_strategy", "HYBRID")
     hybrid_weights = state.get("hybrid_weights", {"semanticRatio": 0.6})
     filter_relaxation = False
+    index_name = (state.get("meili_index_name") or "").strip() or settings.meili_index_name
 
     updates: dict = {}
     new_errors: list[dict] = []
@@ -230,6 +232,7 @@ def searcher_node(state: dict) -> dict:
             filters=filter_string,
             limit=limit,
             retrieve_fields=retrieve_fields,
+            index_name=index_name,
         )
         hits = raw_response.get("hits", [])
         partial_results = bool(raw_response.get("partial", False))
@@ -251,6 +254,7 @@ def searcher_node(state: dict) -> dict:
                 filters=None,
                 limit=limit,
                 retrieve_fields=retrieve_fields,
+                index_name=index_name,
             )
             hits = raw_response.get("hits", [])
             filter_relaxation = True
@@ -293,6 +297,7 @@ def searcher_node(state: dict) -> dict:
                 filters=filter_string,
                 limit=limit,
                 retrieve_fields=retrieve_fields,
+                index_name=index_name,
             )
             keyword_hits = keyword_response.get("hits", [])
 
@@ -328,9 +333,37 @@ def searcher_node(state: dict) -> dict:
                 ).model_dump()
             )
 
+        user_q_raw = (state.get("query") or "").strip()
+        if hits and qca.looks_like_absurd_query(user_q_raw):
+            hits = []
+            new_errors.append(
+                ExtractionError(
+                    node="searcher",
+                    severity=ErrorSeverity.WARNING,
+                    message="QUERY_NOT_SEARCHABLE",
+                    fallback_applied=True,
+                    fallback_description="This search text does not look usable for product search.",
+                ).model_dump()
+            )
+        elif hits and qca.should_clear_hits_for_low_meili_scores(hits):
+            hits = []
+            new_errors.append(
+                ExtractionError(
+                    node="searcher",
+                    severity=ErrorSeverity.WARNING,
+                    message="RETRIEVAL_NO_RESULTS_LOW_SIGNAL",
+                    fallback_applied=True,
+                    fallback_description="Nothing in the index matched with enough confidence.",
+                ).model_dump()
+            )
+
+        retrieval_soft_match = bool(hits) and qca.retrieval_soft_match_from_meili_hits(
+            user_q_raw, hits,
+        )
+
         search_results = _hits_to_search_results(hits)
 
-        idx_stats_at, idx_meta_ok = get_index_updated_at_meta()
+        idx_stats_at, idx_meta_ok = get_index_updated_at_meta(index_name)
         freshness = _build_freshness_report(
             search_results,
             index_stats_updated_at=idx_stats_at,
@@ -341,6 +374,7 @@ def searcher_node(state: dict) -> dict:
         updates["freshness_metadata"] = freshness.model_dump()
         updates["filter_relaxation_applied"] = filter_relaxation
         updates["partial_results"] = partial_results
+        updates["retrieval_soft_match"] = retrieval_soft_match
 
         result_count = len(search_results)
         strategy_used = raw_response.get("strategy_used", strategy)
@@ -376,7 +410,8 @@ def searcher_node(state: dict) -> dict:
             ).model_dump()
         )
         updates["search_results"] = []
-        idx_stats_at, idx_meta_ok = get_index_updated_at_meta()
+        updates["retrieval_soft_match"] = False
+        idx_stats_at, idx_meta_ok = get_index_updated_at_meta(index_name)
         updates["freshness_metadata"] = FreshnessReport(
             index_stats_updated_at=idx_stats_at,
             freshness_unknown=not idx_meta_ok,
@@ -402,7 +437,8 @@ def searcher_node(state: dict) -> dict:
             ).model_dump()
         )
         updates["search_results"] = []
-        idx_stats_at, idx_meta_ok = get_index_updated_at_meta()
+        updates["retrieval_soft_match"] = False
+        idx_stats_at, idx_meta_ok = get_index_updated_at_meta(index_name)
         updates["freshness_metadata"] = FreshnessReport(
             index_stats_updated_at=idx_stats_at,
             freshness_unknown=not idx_meta_ok,

@@ -62,6 +62,28 @@ def health() -> dict[str, Any]:
     return _get_client().health()
 
 
+def list_index_uids() -> list[str]:
+    """Return sorted Meilisearch index UIDs (``GET /indexes``).
+
+    On failure (network, auth), returns a single-element list containing the
+    configured default index so callers still have a usable dropdown default.
+    """
+    base = settings.meili_url.rstrip("/")
+    headers = {"Authorization": f"Bearer {settings.meili_master_key}"}
+    try:
+        r = requests.get(f"{base}/indexes", headers=headers, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        uids = sorted(
+            {str(x["uid"]) for x in data.get("results", []) if isinstance(x, dict) and x.get("uid")}
+        )
+        if uids:
+            return uids
+    except Exception as exc:
+        logger.warning("list_indexes_failed", extra={"error": str(exc)[:200]})
+    return [settings.meili_index_name]
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  Internal: execute search with 3-retry + keyword fallback
 # ══════════════════════════════════════════════════════════════════════════════

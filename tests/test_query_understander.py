@@ -53,6 +53,39 @@ def test_injection_whole_line_stripped_blocks_without_llm_guard():
 # ── Path 2: Successful LLM parse → intent + tokens + history ───────────────
 
 
+def test_query_word_limit_truncates_and_warns(monkeypatch, mocker):
+    from src.utils import config
+
+    config.get_settings.cache_clear()
+    monkeypatch.setenv("MAX_QUERY_WORDS", "5")
+    _mock_safe(mocker)
+    mocker.patch(
+        "src.nodes.query_understander._parse_intent_with_llm",
+        return_value=(
+            {
+                "type": "INFORMATIONAL",
+                "entities": [],
+                "filters": {},
+                "ambiguity_score": 0.3,
+                "language": "en",
+            },
+            10,
+            5,
+        ),
+    )
+    mocker.patch("src.nodes.query_understander.check_budget_projected")
+
+    long_q = " ".join([f"w{i}" for i in range(10)])
+    result = query_understander_node(_base_state(query=long_q))
+
+    assert result["query"] == " ".join([f"w{i}" for i in range(5)])
+    lim_errs = [e for e in result["errors"] if e.get("message") == "QUERY_WORD_LIMIT"]
+    assert lim_errs
+    assert "5" in lim_errs[0].get("fallback_description", "")
+    assert "To provide" in lim_errs[0].get("fallback_description", "")
+    assert result["parsed_intent"]["type"] == "INFORMATIONAL"
+
+
 def test_successful_parse(mocker):
     _mock_safe(mocker)
     mocker.patch(

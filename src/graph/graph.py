@@ -15,7 +15,7 @@ What this file does :
 
 requirements covered:
   - LangGraph StateGraph with all 6 nodes
-  - Loop prevention via iteration_count and evaluator routing
+  - Loop prevention via iteration_count and evaluator routing (retry cap: MAX_SEARCH_ITERATIONS)
   - LangWatch trace wraps the entire pipeline
 """
 
@@ -203,6 +203,7 @@ _compiled_app = compile_graph(checkpointer=_checkpointer)
 def run_search_with_trace(
     query: str,
     session_id: str | None = None,
+    meili_index_name: str | None = None,
 ) -> tuple[dict, list[dict]]:
     """
     The main entry point for running a search query through the pipeline.
@@ -217,6 +218,8 @@ def run_search_with_trace(
     Args:
         query: The raw search string from the user (e.g. "wireless earbuds under $50")
         session_id: Correlates traces across LangWatch; generated if omitted (PRD §5).
+        meili_index_name: Optional Meilisearch index UID; when set, searches that index
+            instead of the default from settings.
 
     Returns:
         ``(final_state, trace)`` where each trace item is
@@ -230,7 +233,9 @@ def run_search_with_trace(
         extra={"query": query, "session_id": sid},
     )
 
-    initial_state = {"query": query, "session_id": sid}
+    initial_state: dict[str, Any] = {"query": query, "session_id": sid}
+    if meili_index_name and str(meili_index_name).strip():
+        initial_state["meili_index_name"] = str(meili_index_name).strip()
     app = _compiled_app
     trace: list[dict] = []
     final_state: dict | None = None
@@ -282,7 +287,11 @@ def run_search_with_trace(
     return final_state, trace
 
 
-def run_search(query: str, session_id: str | None = None) -> dict:
+def run_search(
+    query: str,
+    session_id: str | None = None,
+    meili_index_name: str | None = None,
+) -> dict:
     """
     The main entry point for running a search query through the pipeline.
 
@@ -292,11 +301,14 @@ def run_search(query: str, session_id: str | None = None) -> dict:
     Args:
         query: The raw search string from the user (e.g. "wireless earbuds under $50")
         session_id: Optional trace correlation id (PRD §5).
+        meili_index_name: Optional Meilisearch index UID override.
 
     Returns:
         The final state dict containing search_results, quality_scores, errors, etc.
     """
-    final_state, _ = run_search_with_trace(query, session_id=session_id)
+    final_state, _ = run_search_with_trace(
+        query, session_id=session_id, meili_index_name=meili_index_name,
+    )
     return final_state
 
 

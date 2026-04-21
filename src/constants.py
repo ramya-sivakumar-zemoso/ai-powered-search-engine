@@ -25,6 +25,8 @@ DEFAULT_LANGWATCH_PROJECT = "novamart-search"
 
 # ── Pipeline tuning ──────────────────────────────────────────────────────────
 DEFAULT_MAX_SEARCH_ITERATIONS = 3
+# User query length cap (whitespace-separated words); longer input is truncated with a warning.
+DEFAULT_MAX_QUERY_WORDS = 25
 DEFAULT_TOKEN_BUDGET_USD = 0.02
 DEFAULT_RERANKER_TOP_N = 10
 DEFAULT_CONFIDENCE_THRESHOLD_DEGRADED = 0.30
@@ -53,6 +55,18 @@ DEFAULT_KAFKA_MAX_POLL_RECORDS = 10
 
 # ── Search pipeline (searcher node) ──────────────────────────────────────────
 SEARCH_HITS_LIMIT = 20
+# Retrieval UX: Meilisearch ``_rankingScore`` gates (searcher) + token coverage (shared).
+RETRIEVAL_WEAK_TOKEN_COVERAGE = 0.45
+# Below this max ``_rankingScore`` (with weak token coverage) → ``retrieval_soft_match`` for UI warning.
+RETRIEVAL_SOFT_MATCH_MAX_SCORE = 0.55
+# Collapse to zero hits when scores are noise-level (absurd / no-signal queries).
+RETRIEVAL_COLLAPSE_MAX_SCORE = 0.09
+RETRIEVAL_COLLAPSE_MEAN_TOP3 = 0.075
+# Reporter: show gentle notice when cross-encoder pool is weak (evaluator can stay optimistic).
+RERANK_NOTICE_MAX_MEAN_CONFIDENCE = 0.41
+RERANK_NOTICE_MIN_LOW_CONF_RATIO = 0.50
+# If the best hit is this strong, skip rerank-driven notice (one clear winner).
+RERANK_NOTICE_TOP_CONFIDENCE_ESCAPE = 0.58
 KEYWORD_OVERLAP_MIN_RATIO = 0.5
 KEYWORD_STEM_LEN = 5
 KEYWORD_OVERLAP_TOP_N = 5
