@@ -37,24 +37,93 @@ def _query_word_count(text: str) -> int:
     return len((text or "").strip().split())
 
 
+# ── Word-length guard constant ────────────────────────────────────────────────
+# The longest real English word (pneumonoultramicroscopicsilicovolcanoconiosis)
+# is 45 letters. Any token longer than this is either a typo, a concatenation
+# error, or a deliberate attempt to bypass the word-count cap with no spaces.
+MAX_WORD_LENGTH = 45
+
+
+def _max_word_length(text: str) -> int:
+    """Return the character length of the longest token in *text*.
+
+    Split on whitespace only — the same boundary used by _query_word_count.
+    Returns 0 for an empty or whitespace-only string so callers can do a
+    simple  ``if _max_word_length(raw) > MAX_WORD_LENGTH``  check.
+    """
+    words = (text or "").strip().split()
+    return max((len(w) for w in words), default=0)
+
+
 def _render_query_word_limit_ui(input_key: str, max_words: int) -> None:
-    """Word counter (n / N) and colored banner when over the cap — no overflow-word preview."""
+    """Word counter (n / N) and colored banner when over the cap.
+
+    Checks two independent limits and shows indicators for each:
+
+    1. Word count  — "n / max words" counter (grey → red when over cap).
+                     Amber banner with the existing query_word_limit_user_notice
+                     message when triggered.
+
+    2. Word length — appends "· word exceeds limit" in red to the counter line
+                     when any single token exceeds MAX_WORD_LENGTH (45) chars.
+                     Amber banner with a professional Option-C message when
+                     triggered — independent of the word-count banner.
+
+    Both checks are independent: a query can violate one, both, or neither.
+    Violating word length is treated as a separate issue from violating word
+    count, so each has its own clear indicator without mixing messages.
+    """
     if max_words <= 0:
         return
+
     raw = st.session_state.get(input_key)
     if not isinstance(raw, str):
         raw = str(raw or "")
+
+    # ── Signal 1: word count ──────────────────────────────────────────────
     n = _query_word_count(raw)
-    over = n > max_words
-    cls = "query-word-counter over" if over else "query-word-counter"
+    over_count = n > max_words
+
+    # ── Signal 2: word length ─────────────────────────────────────────────
+    longest = _max_word_length(raw)
+    over_length = longest > MAX_WORD_LENGTH
+
+    # ── Counter line ──────────────────────────────────────────────────────
+    # The base CSS class drives colour for the word-count portion.
+    # The word-length suffix is always red when triggered, regardless of
+    # whether the word count is also over — each signal has its own colour.
+    count_cls = "query-word-counter over" if over_count else "query-word-counter"
+
+    length_suffix = ""
+    if over_length:
+        # Inline <span> keeps only the suffix red — count colour is set by CSS class
+        length_suffix = (
+            ' <span style="color:#f85149;font-weight:600;">'
+            '&nbsp;·&nbsp;word exceeds limit'
+            '</span>'
+        )
+
     st.markdown(
-        f'<div class="{cls}">{n} / {max_words} words</div>',
+        f'<div class="{count_cls}">{n}&nbsp;/&nbsp;{max_words} words{length_suffix}</div>',
         unsafe_allow_html=True,
     )
-    if over:
+
+    # ── Banner: word count exceeded ───────────────────────────────────────
+    if over_count:
         msg = query_word_limit_user_notice(max_words)
         st.markdown(
             f'<div class="query-word-limit-banner">{html.escape(msg)}</div>',
+            unsafe_allow_html=True,
+        )
+
+    # ── Banner: word length exceeded ─────────────────────────────────────
+    if over_length:
+        length_msg = (
+            f"Search terms work best when individual words are under "
+            f"{MAX_WORD_LENGTH} characters. Please review your query."
+        )
+        st.markdown(
+            f'<div class="query-word-limit-banner">{html.escape(length_msg)}</div>',
             unsafe_allow_html=True,
         )
 
@@ -740,10 +809,49 @@ with col_input:
 
 query = (st.session_state.get(_QUERY_WIDGET_KEY) or "").strip()
 
+# ── Query validation gate ─────────────────────────────────────────────────────
+# Computed after the word-limit UI so the same raw value drives both the
+# banners above and the button state below. Two independent checks mirror
+# the two indicators in _render_query_word_limit_ui:
+#   1. Word count  — more than max_q_words tokens
+#   2. Word length — any single token longer than MAX_WORD_LENGTH (45) chars
+# Either violation disables the Search button with a tooltip explaining why.
+_raw_query   = st.session_state.get(_QUERY_WIDGET_KEY) or ""
+_word_count  = _query_word_count(_raw_query)
+_longest     = _max_word_length(_raw_query)
+_over_count  = max_q_words > 0 and _word_count > max_q_words
+_over_length = _longest > MAX_WORD_LENGTH
+query_invalid = _over_count or _over_length
+
+# Tooltip shown on the disabled button — one-line reason without requiring
+# the user to read the full banner below the input.
+if _over_count and _over_length:
+    _btn_tooltip = (
+        f"Query exceeds both limits — reduce to {max_q_words} words "
+        f"and keep each word under {MAX_WORD_LENGTH} characters."
+    )
+elif _over_count:
+    _btn_tooltip = (
+        f"Too many words — please shorten your query to {max_q_words} words or fewer."
+    )
+elif _over_length:
+    _btn_tooltip = (
+        f"One or more words exceed {MAX_WORD_LENGTH} characters — "
+        "please review your query."
+    )
+else:
+    _btn_tooltip = None   # button is active — no tooltip needed
+
 with col_hits:
     max_hits = st.number_input("Max hits", min_value=5, max_value=200, value=25)
 with col_btn:
-    run = st.button("Search", type="primary", use_container_width=True)
+    run = st.button(
+        "Search",
+        type="primary",
+        use_container_width=True,
+        disabled=query_invalid,           # grayed out when either limit is breached
+        help=_btn_tooltip,                # hover tooltip explains why (None = no tooltip)
+    )
 
 # ── Run pipeline ──────────────────────────────────────────────────────────────
 

@@ -11,7 +11,7 @@ meilisearch>=0.31.0
 requests==2.32.3
 
 # Cross-encoder reranker (sentence-transformers); Meilisearch embeds via built-in Hugging Face.
-sentence-transformers==3.3.1
+sentence-transformers==3.3.1 
 torch==2.5.1
 
 # State schema
