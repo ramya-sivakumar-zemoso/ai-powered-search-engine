@@ -62,4 +62,8 @@ logs/
 
 # Meilisearch data (if running locally in project)
 data.ms/
-meilisearch
+meilisearch.exe
+
+checkpoints.db
+checkpoints.db-shm
+checkpoints.db-wal

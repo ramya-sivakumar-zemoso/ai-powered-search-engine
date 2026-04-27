@@ -164,14 +164,24 @@ def _parse_intent_with_llm(sanitized_query: str) -> tuple[dict, int, int]:
         HumanMessage(content=human_content),
     ]
 
-    response = llm.invoke(messages, config=get_langwatch_callback())
+    try:
+        response = llm.invoke(messages, config=get_langwatch_callback())
+        prompt_tokens, completion_tokens = extract_token_usage(response)
+        content = strip_markdown_fences(response.content)
+        parsed = json.loads(content)
+        return parsed, prompt_tokens, completion_tokens
 
-    prompt_tokens, completion_tokens = extract_token_usage(response)
+    except Exception as e:
+        # LOG THE REAL ERROR TYPE
+        print(f"DEBUG: Caught error type: {type(e).__name__}")
+        print(f"DEBUG: Error details: {str(e)}")
 
-    content = strip_markdown_fences(response.content)
-    parsed = json.loads(content)
-    return parsed, prompt_tokens, completion_tokens
-
+        # SPECIFIC CHECK FOR QUOTA/BILLING
+        if "insufficient_quota" in str(e) or "exceeded your current quota" in str(e):
+             # This is a billing issue. Fix: Add credits at https://openai.com
+             return {"intent": "QUOTA_EXCEEDED_FALLBACK", "filters": []}, 0, 0
+        
+        return {"intent": "GENERAL_ERROR_FALLBACK", "filters": []}, 0, 0
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  MAIN NODE FUNCTION
